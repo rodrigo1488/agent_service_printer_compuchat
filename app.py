@@ -1,4 +1,6 @@
 """Print Agent - Interface web e servidor HTTP."""
+import os
+import sys
 import threading
 from flask import Flask, request, redirect, url_for, render_template, jsonify
 from flask_cors import CORS
@@ -6,7 +8,14 @@ from flask_cors import CORS
 import db
 from agent import start_agent_thread, stop_agent
 
-app = Flask(__name__)
+# Suporte a executável PyInstaller (sem console): templates extraídos em sys._MEIPASS
+if getattr(sys, "frozen", False):
+    _base = sys._MEIPASS
+    _template_folder = os.path.join(_base, "templates")
+else:
+    _template_folder = "templates"
+
+app = Flask(__name__, template_folder=_template_folder)
 CORS(app)
 app.config["SECRET_KEY"] = "print-agent-secret"
 

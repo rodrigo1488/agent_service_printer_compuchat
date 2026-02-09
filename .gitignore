@@ -10,3 +10,8 @@ ENV/
 *.log
 .DS_Store
 config.json
+agent.db
+# Build PyInstaller
+dist/
+build/
+*.spec
