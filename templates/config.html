@@ -1,0 +1,193 @@
+{% extends "base.html" %}
+{% block title %}Configuração - Print Agent{% endblock %}
+{% block content %}
+<h1>Configuração do Print Agent</h1>
+{% if message %}
+<div class="alert {{ 'alert-success' if message_type == 'success' else 'alert-error' }}">{{ message }}</div>
+{% endif %}
+<form method="post" action="/config" id="config-form">
+    <fieldset style="margin-bottom: 1.5rem;">
+        <legend style="margin-bottom: 0.5rem; font-weight: 600;">Conexão SaaS</legend>
+        <div class="form-group">
+            <label for="ws_url">URL WebSocket</label>
+            <input type="url" id="ws_url" name="ws_url" value="{{ ws_url }}" placeholder="wss://api.dominio.com/ws/print">
+        </div>
+    </fieldset>
+
+    <fieldset>
+        <legend style="margin-bottom: 0.5rem; font-weight: 600;">Impressoras</legend>
+        <p style="color:#666; font-size: 0.9rem;">Cada impressora corresponde a um dispositivo (Device ID + Token) no SaaS e a uma impressora física (IP/porta). As impressoras são cadastradas no sistema (banco de dados); aqui você associa cada uma ao IP da impressora local.</p>
+        <div id="printers-container">
+            {% for p in printers %}
+            <div class="printer-block" data-index="{{ loop.index0 }}">
+                <hr style="margin: 1rem 0;">
+                <h3 style="font-size: 1rem; margin-bottom: 0.5rem;">Impressora {{ loop.index }}</h3>
+                <div class="form-row" style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem;">
+                    <div class="form-group">
+                        <label>Device ID</label>
+                        <input type="text" name="printer_{{ loop.index0 }}_device_id" value="{{ p.device_id }}" placeholder="ex: cozinha-01">
+                    </div>
+                    <div class="form-group">
+                        <label>Token (Bearer)</label>
+                        <input type="password" name="printer_{{ loop.index0 }}_token" value="{{ p.token }}" placeholder="Token do dispositivo">
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label>Nome (opcional)</label>
+                    <input type="text" name="printer_{{ loop.index0 }}_name" value="{{ p.name }}" placeholder="ex: Cozinha">
+                </div>
+                <div class="form-row" style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem;">
+                    <div class="form-group">
+                        <label>IP da impressora</label>
+                        <input type="text" name="printer_{{ loop.index0 }}_printer_ip" value="{{ p.printer_ip }}">
+                    </div>
+                    <div class="form-group">
+                        <label>Porta</label>
+                        <input type="number" name="printer_{{ loop.index0 }}_printer_port" value="{{ p.printer_port }}">
+                    </div>
+                </div>
+                <div class="form-row" style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem;">
+                    <div class="form-group">
+                        <label>Tipo</label>
+                        <select name="printer_{{ loop.index0 }}_printer_type">
+                            <option value="raw" {% if p.printer_type == 'raw' %}selected{% endif %}>RAW (porta 9100)</option>
+                            <option value="ipp" {% if p.printer_type == 'ipp' %}selected{% endif %}>IPP</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>Largura do papel (caracteres)</label>
+                        <input type="number" name="printer_{{ loop.index0 }}_paper_width" value="{{ p.paper_width }}" min="24" max="48">
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label>Codificação</label>
+                    <select name="printer_{{ loop.index0 }}_printer_encoding">
+                        <option value="cp850" {% if p.printer_encoding == 'cp850' %}selected{% endif %}>CP850</option>
+                        <option value="cp860" {% if p.printer_encoding == 'cp860' %}selected{% endif %}>CP860</option>
+                        <option value="cp1252" {% if p.printer_encoding == 'cp1252' %}selected{% endif %}>CP1252</option>
+                        <option value="utf8" {% if p.printer_encoding == 'utf8' %}selected{% endif %}>UTF-8</option>
+                    </select>
+                </div>
+                <button type="button" class="btn-remove" aria-label="Remover impressora">Remover</button>
+            </div>
+            {% endfor %}
+        </div>
+        <div style="margin-top: 1rem;">
+            <button type="button" id="add-printer">Adicionar impressora</button>
+        </div>
+    </fieldset>
+    <div style="margin-top: 1.5rem;">
+        <button type="submit">Salvar configuração</button>
+    </div>
+</form>
+
+<template id="printer-block-tpl">
+    <div class="printer-block" data-index="">
+        <hr style="margin: 1rem 0;">
+        <h3 style="font-size: 1rem; margin-bottom: 0.5rem;">Impressora <span class="printer-num"></span></h3>
+        <div class="form-row" style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem;">
+            <div class="form-group">
+                <label>Device ID</label>
+                <input type="text" name="printer_X_device_id" placeholder="ex: cozinha-01">
+            </div>
+            <div class="form-group">
+                <label>Token (Bearer)</label>
+                <input type="password" name="printer_X_token" placeholder="Token do dispositivo">
+            </div>
+        </div>
+        <div class="form-group">
+            <label>Nome (opcional)</label>
+            <input type="text" name="printer_X_name" placeholder="ex: Cozinha">
+        </div>
+        <div class="form-row" style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem;">
+            <div class="form-group">
+                <label>IP da impressora</label>
+                <input type="text" name="printer_X_printer_ip" value="192.168.1.100">
+            </div>
+            <div class="form-group">
+                <label>Porta</label>
+                <input type="number" name="printer_X_printer_port" value="9100">
+            </div>
+        </div>
+        <div class="form-row" style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem;">
+            <div class="form-group">
+                <label>Tipo</label>
+                <select name="printer_X_printer_type">
+                    <option value="raw" selected>RAW (porta 9100)</option>
+                    <option value="ipp">IPP</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label>Largura do papel (caracteres)</label>
+                <input type="number" name="printer_X_paper_width" value="32" min="24" max="48">
+            </div>
+        </div>
+        <div class="form-group">
+            <label>Codificação</label>
+            <select name="printer_X_printer_encoding">
+                <option value="cp850" selected>CP850</option>
+                <option value="cp860">CP860</option>
+                <option value="cp1252">CP1252</option>
+                <option value="utf8">UTF-8</option>
+            </select>
+        </div>
+        <button type="button" class="btn-remove" aria-label="Remover impressora">Remover</button>
+    </div>
+</template>
+
+<script>
+(function() {
+    var container = document.getElementById('printers-container');
+    var tpl = document.getElementById('printer-block-tpl');
+    var addBtn = document.getElementById('add-printer');
+
+    function nextIndex() {
+        var blocks = container.querySelectorAll('.printer-block');
+        var max = -1;
+        blocks.forEach(function(b) {
+            var idx = parseInt(b.getAttribute('data-index'), 10);
+            if (!isNaN(idx) && idx > max) max = idx;
+        });
+        return max + 1;
+    }
+
+    function setBlockIndex(block, idx) {
+        block.setAttribute('data-index', idx);
+        var numEl = block.querySelector('.printer-num');
+        if (numEl) numEl.textContent = idx + 1;
+        block.querySelectorAll('[name]').forEach(function(input) {
+            var n = input.getAttribute('name');
+            if (n && n.indexOf('printer_') === 0) {
+                var rest = n.replace(/^printer_(X|\d+)_/, '');
+                input.setAttribute('name', 'printer_' + idx + '_' + rest);
+            }
+        });
+    }
+
+    addBtn.addEventListener('click', function() {
+        var idx = nextIndex();
+        var clone = tpl.content.cloneNode(true);
+        var block = clone.querySelector('.printer-block');
+        setBlockIndex(block, idx);
+        block.querySelector('.printer-num').textContent = idx + 1;
+        container.appendChild(clone);
+        bindRemove(block);
+    });
+
+    function bindRemove(block) {
+        block.querySelector('.btn-remove').addEventListener('click', function() {
+            block.remove();
+            renumberBlocks();
+        });
+    }
+
+    function renumberBlocks() {
+        container.querySelectorAll('.printer-block').forEach(function(block, i) {
+            setBlockIndex(block, i);
+        });
+    }
+
+    container.querySelectorAll('.printer-block').forEach(bindRemove);
+})();
+</script>
+{% endblock %}

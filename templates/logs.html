@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block title %}Histórico - Print Agent{% endblock %}
+{% block content %}
+<h1>Histórico de Impressões</h1>
+{% if logs %}
+<table>
+    <thead>
+        <tr>
+            <th>ID</th>
+            <th>Job ID</th>
+            <th>Status</th>
+            <th>Mensagem</th>
+            <th>Data</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for log in logs %}
+        <tr>
+            <td>{{ log.id }}</td>
+            <td>{{ log.job_id }}</td>
+            <td>{{ log.status }}</td>
+            <td>{{ log.message or '-' }}</td>
+            <td>{{ log.created_at }}</td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% else %}
+<p>Nenhum registro de impressão ainda.</p>
+{% endif %}
+{% endblock %}
