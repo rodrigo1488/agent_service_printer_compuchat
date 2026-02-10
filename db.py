@@ -16,7 +16,7 @@ DEFAULT_CONFIG = {
     "token": "",
     "device_id": "",
 }
-PRINTER_KEYS = ("device_id", "token", "printer_ip", "printer_port", "printer_type", "paper_width", "printer_encoding", "name")
+PRINTER_KEYS = ("device_id", "token", "printer_ip", "printer_port", "printer_type", "paper_width", "printer_encoding", "name", "connection_type", "printer_name_local")
 
 
 def _get_connection():
@@ -79,11 +79,16 @@ def set_config(key: str, value: str) -> None:
     """Define valor de uma chave de configuração."""
     conn = _get_connection()
     try:
+        print(f"[DEBUG] set_config: key={key}, value_length={len(str(value))}")
         conn.execute(
             "INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)",
             (key, str(value)),
         )
         conn.commit()
+        print(f"[DEBUG] set_config: valor salvo com sucesso")
+    except Exception as e:
+        print(f"[ERROR] set_config: erro ao salvar - {str(e)}")
+        raise
     finally:
         conn.close()
 
@@ -132,6 +137,8 @@ def get_printers() -> List[Dict[str, Any]]:
                         "paper_width": str(p.get("paper_width") or "32"),
                         "printer_encoding": p.get("printer_encoding") or "cp850",
                         "name": p.get("name") or "",
+                        "connection_type": p.get("connection_type") or "network",
+                        "printer_name_local": p.get("printer_name_local") or "",
                     }
                     for p in data
                 ]
@@ -150,6 +157,8 @@ def get_printers() -> List[Dict[str, Any]]:
                 "paper_width": get_config("paper_width") or "32",
                 "printer_encoding": get_config("printer_encoding") or "cp850",
                 "name": "",
+                "connection_type": "network",
+                "printer_name_local": "",
             }
         ]
     return []
@@ -157,6 +166,7 @@ def get_printers() -> List[Dict[str, Any]]:
 
 def set_printers(printers: List[Dict[str, Any]]) -> None:
     """Salva lista de impressoras como JSON."""
+    print(f"[DEBUG] set_printers chamado com {len(printers)} impressora(s)")
     list_ = [
         {
             "device_id": p.get("device_id", ""),
@@ -167,10 +177,15 @@ def set_printers(printers: List[Dict[str, Any]]) -> None:
             "paper_width": str(p.get("paper_width") or "32"),
             "printer_encoding": p.get("printer_encoding") or "cp850",
             "name": p.get("name") or "",
+            "connection_type": p.get("connection_type") or "network",
+            "printer_name_local": p.get("printer_name_local") or "",
         }
         for p in printers
     ]
-    set_config("printers", json.dumps(list_))
+    json_data = json.dumps(list_)
+    print(f"[DEBUG] JSON a ser salvo: {json_data}")
+    set_config("printers", json_data)
+    print(f"[DEBUG] Configuração salva no banco de dados")
 
 
 def get_print_logs(limit: int = 50) -> list:

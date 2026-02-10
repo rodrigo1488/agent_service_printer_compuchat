@@ -34,12 +34,25 @@ def _log(level: str, msg: str):
 
 def _handle_print_job(ws, job_id: int, conteudo: dict, printer_config: dict):
     """Processa um job de impressão usando a impressora indicada em printer_config."""
+    device_id = printer_config.get("device_id", "unknown")
+    printer_ip = printer_config.get("printer_ip", "192.168.1.100")
+    printer_port = int(printer_config.get("printer_port") or 9100)
+    
+    connection_type = printer_config.get("connection_type") or "network"
+    if connection_type == "local":
+        printer_name_local = printer_config.get("printer_name_local", "")
+        _log("INFO", f"Job {job_id}: Processando na impressora local device_id={device_id}, nome={printer_name_local}")
+    else:
+        _log("INFO", f"Job {job_id}: Processando na impressora device_id={device_id}, ip={printer_ip}:{printer_port}")
+    
     printer = PrinterService(
-        printer_ip=printer_config.get("printer_ip", "192.168.1.100"),
-        printer_port=int(printer_config.get("printer_port") or 9100),
+        printer_ip=printer_ip,
+        printer_port=printer_port,
         printer_type=printer_config.get("printer_type") or "raw",
         paper_width=printer_config.get("paper_width") or "32",
         printer_encoding=printer_config.get("printer_encoding") or "cp850",
+        connection_type=connection_type,
+        printer_name_local=printer_config.get("printer_name_local") or None,
     )
 
     try:
@@ -57,11 +70,11 @@ def _handle_print_job(ws, job_id: int, conteudo: dict, printer_config: dict):
         ws.send(json.dumps(ack))
 
         if success:
-            _log("INFO", f"Job {job_id} impresso com sucesso")
+            _log("INFO", f"Job {job_id} impresso com sucesso na impressora device_id={device_id}")
         else:
-            _log("ERROR", f"Job {job_id} falhou: {message}")
+            _log("ERROR", f"Job {job_id} falhou na impressora device_id={device_id}: {message}")
     except Exception as e:
-        _log("ERROR", f"Job {job_id} erro: {str(e)}")
+        _log("ERROR", f"Job {job_id} erro na impressora device_id={device_id}: {str(e)}")
         db.add_print_log(job_id, "error", str(e))
         ws.send(json.dumps({"event": "ack", "job_id": job_id, "status": "error", "message": str(e)}))
 
@@ -92,6 +105,13 @@ def _on_error(ws, error):
     """Handler de erros WebSocket."""
     if error:
         _log("ERROR", f"WebSocket error: {error}")
+        # Se for erro 401, dar dica sobre token
+        if "401" in str(error) or "Unauthorized" in str(error):
+            _log("ERROR", "ERRO DE AUTENTICAÇÃO (401): O token ou deviceId estão incorretos.")
+            _log("ERROR", "SOLUÇÃO: 1) Acesse Configurações > Dispositivos de Impressão no sistema")
+            _log("ERROR", "         2) Copie o TOKEN correto do dispositivo (não use o deviceId como token)")
+            _log("ERROR", "         3) Cole o token no campo 'Token (Bearer)' na configuração do agente")
+            _log("ERROR", "         4) Certifique-se de que o deviceId no agente corresponde ao deviceId no sistema")
 
 
 def _on_close(ws, close_status_code, close_msg):
@@ -112,12 +132,15 @@ def _run_websocket(printer_config: dict):
         return
 
     ws_url = db.get_config("ws_url")
-    token = printer_config.get("token", "")
-    device_id = printer_config.get("device_id", "")
+    token = printer_config.get("token", "").strip()
+    device_id = printer_config.get("device_id", "").strip()
 
     if not ws_url or not token or not device_id:
         _log("WARN", f"Impressora sem ws_url/token/device_id (device_id={device_id or 'vazio'}). Configure em http://localhost:5000/")
         return
+    
+    # Log das credenciais (sem expor o token completo por segurança)
+    _log("INFO", f"Credenciais para device_id={device_id}: token_length={len(token)}, token_preview={token[:20] if len(token) > 20 else token}...")
 
     retry_delay = 1
     max_retry_delay = 60

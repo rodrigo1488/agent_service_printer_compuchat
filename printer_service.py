@@ -3,6 +3,17 @@ import http.client
 import json
 from datetime import datetime
 
+# Tentar importar win32print para impressoras locais (Windows)
+try:
+    import win32print
+    import win32api
+    import tempfile
+    import os
+    import time
+    HAS_WIN32PRINT = True
+except ImportError:
+    HAS_WIN32PRINT = False
+
 
 # Tamanho do módulo do QR (1-16). 10 = maior, mais fácil de escanear no celular.
 QR_MODULE_SIZE = 10
@@ -30,24 +41,28 @@ def _escpos_qr_bytes(url: str) -> bytes:
 
 
 class PrinterService:
-    """Serviço para impressão em impressoras de rede"""
+    """Serviço para impressão em impressoras de rede ou locais (Windows)"""
     
-    def __init__(self, printer_ip, printer_port=9100, printer_type='raw', paper_width=32, printer_encoding='cp850'):
+    def __init__(self, printer_ip=None, printer_port=9100, printer_type='raw', paper_width=32, printer_encoding='cp850', connection_type='network', printer_name_local=None):
         """
         Inicializa o serviço de impressão
 
         Args:
-            printer_ip: IP da impressora
+            printer_ip: IP da impressora (obrigatório se connection_type='network')
             printer_port: Porta da impressora (9100 para RAW, 631 para IPP)
             printer_type: Tipo de conexão ('raw' ou 'ipp')
             paper_width: Largura em caracteres (32 para 58mm, 48 para 80mm)
             printer_encoding: Codificação para ç, ã, é (cp850, cp860, cp1252, utf8)
+            connection_type: Tipo de conexão ('network' ou 'local')
+            printer_name_local: Nome da impressora local (obrigatório se connection_type='local')
         """
+        self.connection_type = connection_type or 'network'
         self.printer_ip = printer_ip
         self.printer_port = printer_port
         self.printer_type = printer_type
         self.paper_width = int(paper_width) if paper_width else 32
         self.printer_encoding = (printer_encoding or 'cp850').lower()
+        self.printer_name_local = printer_name_local
     
     def print_receipt(self, receipt_data):
         """
@@ -60,7 +75,9 @@ class PrinterService:
             if receipt_data.get("delivery_scan_url"):
                 qr_bytes = _escpos_qr_bytes(receipt_data["delivery_scan_url"])
 
-            if self.printer_type == "ipp":
+            if self.connection_type == "local":
+                return self._print_via_local(receipt_text, qr_bytes=qr_bytes)
+            elif self.printer_type == "ipp":
                 return self._print_via_ipp(receipt_text, qr_bytes=qr_bytes)
             else:
                 return self._print_via_raw(receipt_text, qr_bytes=qr_bytes)
@@ -248,3 +265,52 @@ class PrinterService:
         ipp_request += data
         
         return ipp_request
+    
+    def _print_via_local(self, text, qr_bytes=b""):
+        """Imprime via impressora local do Windows usando win32print com comandos ESC/POS."""
+        if not HAS_WIN32PRINT:
+            print("Erro: win32print não disponível. Apenas Windows suporta impressoras locais.")
+            return False
+        
+        if not self.printer_name_local:
+            print("Erro: Nome da impressora local não especificado.")
+            return False
+        
+        try:
+            _, encoding = self._get_esc_pos_encoding()
+            text_bytes = text.encode(encoding, errors="replace")
+            
+            # Comando ESC/POS para cortar papel: GS V 0 (corte total)
+            # 0x1D = GS (Group Separator)
+            # 0x56 = V (comando de corte)
+            # 0x00 = modo de corte (0 = corte total)
+            esc_pos_cut = b"\x1D\x56\x00"
+            
+            # Comando ESC @ para inicializar a impressora
+            esc_pos_init = b"\x1B\x40"
+            
+            # Combinar inicialização, texto, QR bytes e comando de corte
+            full_content = esc_pos_init + text_bytes + qr_bytes + esc_pos_cut
+            
+            # Abrir a impressora local
+            printer_handle = win32print.OpenPrinter(self.printer_name_local)
+            try:
+                # Iniciar documento com tipo RAW para enviar comandos ESC/POS diretamente
+                job_info = ("Print Agent", None, "RAW")
+                job_id = win32print.StartDocPrinter(printer_handle, 1, job_info)
+                try:
+                    win32print.StartPagePrinter(printer_handle)
+                    # Enviar dados RAW (incluindo comandos ESC/POS)
+                    win32print.WritePrinter(printer_handle, full_content)
+                    win32print.EndPagePrinter(printer_handle)
+                finally:
+                    win32print.EndDocPrinter(printer_handle)
+            finally:
+                win32print.ClosePrinter(printer_handle)
+            
+            print(f"Pedido impresso com sucesso na impressora local: {self.printer_name_local}")
+            return True
+            
+        except Exception as e:
+            print(f"Erro ao imprimir na impressora local {self.printer_name_local}: {str(e)}")
+            return False

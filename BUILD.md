@@ -29,20 +29,24 @@ pip install pyinstaller
 No **PowerShell** ou **CMD**, dentro de `agent_service_printer_compuchat`:
 
 ```bash
-pyinstaller --noconfirm --onefile --noconsole --name "PrintAgent" --add-data "templates;templates" app.py
+pyinstaller --noconfirm --onefile --noconsole --name "PrintAgent" --add-data "templates;templates" --hidden-import win32print --hidden-import win32api --hidden-import win32print --hidden-import websocket app.py
 ```
 
+**Parâmetros:**
 - **`--noconsole`** — aplicação roda sem janela de terminal (sem console).
 - **`--onefile`** — um único arquivo `.exe`.
 - **`--add-data "templates;templates"`** — inclui a pasta `templates` dentro do executável (no Windows use `;` entre origem e destino).
+- **`--hidden-import win32print`** — inclui módulo win32print (impressoras locais Windows).
+- **`--hidden-import win32api`** — inclui módulo win32api (impressoras locais Windows).
+- **`--hidden-import websocket`** — inclui módulo websocket-client.
 - **`app.py`** — ponto de entrada da aplicação.
 
 ### No Linux / macOS (referência)
 
-Se for gerar em outro SO, use `:` no `--add-data`:
+Se for gerar em outro SO, use `:` no `--add-data` e remova os imports do win32:
 
 ```bash
-pyinstaller --noconfirm --onefile --noconsole --name "PrintAgent" --add-data "templates:templates" app.py
+pyinstaller --noconfirm --onefile --noconsole --name "PrintAgent" --add-data "templates:templates" --hidden-import websocket app.py
 ```
 
 ## Onde fica o executável
@@ -70,7 +74,9 @@ A interface fica em **http://localhost:5000/** (configuração e logs). O agente
 cd agent_service_printer_compuchat
 pip install -r requirements.txt
 pip install pyinstaller
-pyinstaller --noconfirm --onefile --noconsole --name "PrintAgent" --add-data "templates;templates" app.py
+pyinstaller --noconfirm --onefile --noconsole --name "PrintAgent" --add-data "templates;templates" --hidden-import win32print --hidden-import win32api --hidden-import websocket app.py
 ```
 
 Executável gerado: `dist\PrintAgent.exe`
+
+**Nota:** O PyInstaller detecta automaticamente os módulos Python locais (`agent.py`, `db.py`, `printer_service.py`, `receipt_formatter.py`), mas os módulos opcionais como `win32print` e `websocket` precisam ser explicitamente incluídos com `--hidden-import`.
