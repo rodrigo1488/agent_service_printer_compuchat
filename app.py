@@ -31,10 +31,11 @@ db.init_db()
 
 
 def _config_context():
-    """Dados para o template de configuração: ws_url e lista de impressoras."""
+    """Dados para o template de configuração: ws_url, lista de impressoras e opções."""
     ws_url = db.get_config("ws_url")
     printers = db.get_printers()
-    return {"ws_url": ws_url, "printers": printers}
+    restart_on_save = (db.get_config("restart_service_on_save") or "true").lower() == "true"
+    return {"ws_url": ws_url, "printers": printers, "restart_service_on_save": restart_on_save}
 
 
 @app.route("/")
@@ -100,10 +101,15 @@ def config():
                 print(f"[DEBUG] Impressora {idx} adicionada: {printer_data}")
             print(f"[DEBUG] Salvando {len(printers)} impressora(s): {printers}")
             db.set_printers(printers)
+            # Opção "Reiniciar serviço ao salvar"
+            restart_on_save = request.form.get("restart_service_on_save", "true").lower() in ("true", "1", "on", "yes")
+            db.set_config("restart_service_on_save", "true" if restart_on_save else "false")
             print(f"[DEBUG] Impressoras salvas com sucesso")
-            stop_agent()
-            start_agent_thread()
-            return redirect(url_for("index", message="Configuração salva com sucesso!", message_type="success"))
+            if restart_on_save:
+                stop_agent()
+                start_agent_thread()
+                print("[INFO] Serviço reiniciado após salvar configuração.")
+            return redirect(url_for("index", message="Configuração salva com sucesso!" + (" Serviço reiniciado." if restart_on_save else ""), message_type="success"))
         except Exception as e:
             import traceback
             error_msg = f"Erro: {str(e)}"
@@ -256,13 +262,22 @@ def run_flask():
 
 
 if __name__ == "__main__":
-    print("=" * 50)
-    print("Print Agent - WebSocket")
-    print("=" * 50)
-    print("Interface: http://localhost:5000/")
-    print("Health:    http://localhost:5000/health")
-    print("=" * 50)
-
-    start_agent_thread()
-
-    run_flask()
+    # Modo bandeja: com --tray ou quando for executável (PyInstaller sem console)
+    use_tray = "--tray" in sys.argv or getattr(sys, "frozen", False)
+    if use_tray:
+        try:
+            from tray import run_tray
+            run_tray(run_flask)
+        except ImportError as e:
+            print("Erro ao iniciar bandeja (instale: pip install pystray Pillow):", e)
+            start_agent_thread()
+            run_flask()
+    else:
+        print("=" * 50)
+        print("Print Agent - WebSocket")
+        print("=" * 50)
+        print("Interface: http://localhost:5000/")
+        print("Health:    http://localhost:5000/health")
+        print("=" * 50)
+        start_agent_thread()
+        run_flask()

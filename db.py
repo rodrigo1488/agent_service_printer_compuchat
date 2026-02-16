@@ -15,6 +15,7 @@ DEFAULT_CONFIG = {
     "ws_url": "wss://api.dominio.com/ws/print",
     "token": "",
     "device_id": "",
+    "restart_service_on_save": "true",
 }
 PRINTER_KEYS = ("device_id", "token", "printer_ip", "printer_port", "printer_type", "paper_width", "printer_encoding", "name", "connection_type", "printer_name_local")
 

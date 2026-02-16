@@ -1,6 +1,6 @@
-# Gerar executável do Print Agent (sem console)
+# Gerar executável do Print Agent (bandeja do sistema)
 
-Instruções para gerar um `.exe` do Print Agent que roda **sem abrir janela de console** no Windows.
+Instruções para gerar um `.exe` do Print Agent que roda na **bandeja do sistema** (system tray) no Windows, com opções **Ver logs** e **Sair**.
 
 ## Arquivos removidos do diretório (limpeza)
 
@@ -24,12 +24,14 @@ pip install -r requirements.txt
 pip install pyinstaller
 ```
 
+As dependências `pystray` e `Pillow` (já em `requirements.txt`) são usadas para o ícone na bandeja.
+
 ## Comando para gerar o executável (sem console)
 
 No **PowerShell** ou **CMD**, dentro de `agent_service_printer_compuchat`:
 
 ```bash
-pyinstaller --noconfirm --onefile --noconsole --name "PrintAgent" --add-data "templates;templates" --hidden-import win32print --hidden-import win32api --hidden-import win32print --hidden-import websocket app.py
+pyinstaller --noconfirm --onefile --noconsole --name "PrintAgent" --add-data "templates;templates" --hidden-import win32print --hidden-import win32api --hidden-import websocket --hidden-import pystray --hidden-import PIL --hidden-import PIL.Image --hidden-import PIL.ImageDraw app.py
 ```
 
 **Parâmetros:**
@@ -66,7 +68,13 @@ Você pode copiar apenas `PrintAgent.exe` para outra pasta ou máquina. Na prime
 1. **Duplo clique** em `PrintAgent.exe`, ou
 2. Pelo terminal: `.\dist\PrintAgent.exe`
 
-A interface fica em **http://localhost:5000/** (configuração e logs). O agente WebSocket sobe junto; não aparece janela de console.
+O agente sobe na **bandeja do sistema** (ícone ao lado do relógio). Clique com o botão direito no ícone para:
+
+- **Abrir configuração** — abre http://localhost:5000/ no navegador
+- **Ver logs** — abre o arquivo `agent_console.log` (mesmo diretório do .exe) no Bloco de Notas para acompanhar o que rodaria no terminal
+- **Sair** — encerra o agente
+
+O arquivo `agent_console.log` é criado/atualizado automaticamente e contém toda a saída do agente (conexão WebSocket, jobs de impressão, erros). Use **Ver logs** para depurar se as impressões pararem de chegar após o build.
 
 ## Resumo do comando (copiar e colar)
 
@@ -74,9 +82,12 @@ A interface fica em **http://localhost:5000/** (configuração e logs). O agente
 cd agent_service_printer_compuchat
 pip install -r requirements.txt
 pip install pyinstaller
-pyinstaller --noconfirm --onefile --noconsole --name "PrintAgent" --add-data "templates;templates" --hidden-import win32print --hidden-import win32api --hidden-import websocket app.py
+pyinstaller --noconfirm --onefile --noconsole --name "PrintAgent" --add-data "templates;templates" --hidden-import win32print --hidden-import win32api --hidden-import websocket --hidden-import pystray --hidden-import PIL --hidden-import PIL.Image --hidden-import PIL.ImageDraw app.py
 ```
 
 Executável gerado: `dist\PrintAgent.exe`
 
-**Nota:** O PyInstaller detecta automaticamente os módulos Python locais (`agent.py`, `db.py`, `printer_service.py`, `receipt_formatter.py`), mas os módulos opcionais como `win32print` e `websocket` precisam ser explicitamente incluídos com `--hidden-import`.
+**Testar em modo console (logs no terminal):** `python app.py`  
+**Testar em modo bandeja (como o .exe):** `python app.py --tray`
+
+**Nota:** O PyInstaller detecta automaticamente os módulos Python locais (`agent.py`, `db.py`, `printer_service.py`, `receipt_formatter.py`, `tray.py`), mas os módulos opcionais como `win32print`, `websocket`, `pystray` e `PIL` precisam ser explicitamente incluídos com `--hidden-import`.

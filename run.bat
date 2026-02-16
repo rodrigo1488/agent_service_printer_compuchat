@@ -29,6 +29,6 @@ if errorlevel 1 (
 echo.
 echo Iniciando servidor...
 echo.
-python app.py
+python app.py --tray
 
 pause
