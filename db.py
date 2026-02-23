@@ -5,6 +5,12 @@ import os
 from datetime import datetime
 from typing import List, Dict, Any
 
+from error_recovery import (
+    DatabaseRecovery,
+    retry_with_backoff,
+    RetryConfig,
+)
+
 DB_FILE = "agent.db"
 DEFAULT_CONFIG = {
     "printer_ip": "192.168.1.100",
@@ -21,8 +27,16 @@ PRINTER_KEYS = ("device_id", "token", "printer_ip", "printer_port", "printer_typ
 
 def _get_connection():
     """Retorna conexão com o banco."""
-    conn = sqlite3.connect(DB_FILE)
+    # Validar conexão antes de retornar
+    if not DatabaseRecovery.validate_db_connection(DB_FILE):
+        # Tentar criar backup e recriar banco se necessário
+        print(f"[WARN] Problema detectado no banco de dados. Tentando recuperar...")
+        DatabaseRecovery.backup_db(DB_FILE)
+    
+    conn = sqlite3.connect(DB_FILE, timeout=10.0)  # Timeout aumentado
     conn.row_factory = sqlite3.Row
+    # Habilitar WAL mode para melhor concorrência
+    conn.execute("PRAGMA journal_mode=WAL")
     return conn
 
 
@@ -77,20 +91,30 @@ def get_config(key: str) -> str:
 
 def set_config(key: str, value: str) -> None:
     """Define valor de uma chave de configuração."""
-    conn = _get_connection()
+    @retry_with_backoff(RetryConfig(
+        max_retries=3,
+        initial_delay=0.5,
+        max_delay=5.0,
+        retryable_exceptions=(sqlite3.OperationalError, sqlite3.DatabaseError)
+    ))
+    def _save_config():
+        conn = _get_connection()
+        try:
+            print(f"[DEBUG] set_config: key={key}, value_length={len(str(value))}")
+            conn.execute(
+                "INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)",
+                (key, str(value)),
+            )
+            conn.commit()
+            print(f"[DEBUG] set_config: valor salvo com sucesso")
+        finally:
+            conn.close()
+    
     try:
-        print(f"[DEBUG] set_config: key={key}, value_length={len(str(value))}")
-        conn.execute(
-            "INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)",
-            (key, str(value)),
-        )
-        conn.commit()
-        print(f"[DEBUG] set_config: valor salvo com sucesso")
+        _save_config()
     except Exception as e:
-        print(f"[ERROR] set_config: erro ao salvar - {str(e)}")
+        print(f"[ERROR] set_config: erro ao salvar após múltiplas tentativas - {str(e)}")
         raise
-    finally:
-        conn.close()
 
 
 def get_all_config() -> dict:
@@ -109,15 +133,28 @@ def get_all_config() -> dict:
 
 def add_print_log(job_id: int, status: str, message: str = None) -> None:
     """Adiciona registro de impressão ao log."""
-    conn = _get_connection()
+    @retry_with_backoff(RetryConfig(
+        max_retries=2,
+        initial_delay=0.3,
+        max_delay=2.0,
+        retryable_exceptions=(sqlite3.OperationalError, sqlite3.DatabaseError)
+    ))
+    def _save_log():
+        conn = _get_connection()
+        try:
+            conn.execute(
+                "INSERT INTO print_logs (job_id, status, message) VALUES (?, ?, ?)",
+                (job_id, status, message or ""),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    
     try:
-        conn.execute(
-            "INSERT INTO print_logs (job_id, status, message) VALUES (?, ?, ?)",
-            (job_id, status, message or ""),
-        )
-        conn.commit()
-    finally:
-        conn.close()
+        _save_log()
+    except Exception as e:
+        # Log de erro mas não falhar completamente
+        print(f"[ERROR] Falha ao salvar log no banco (job_id={job_id}): {e}")
 
 
 def get_printers() -> List[Dict[str, Any]]:
@@ -166,7 +203,16 @@ def get_printers() -> List[Dict[str, Any]]:
 
 def set_printers(printers: List[Dict[str, Any]]) -> None:
     """Salva lista de impressoras como JSON."""
+    from error_recovery import DataValidator
+    
     print(f"[DEBUG] set_printers chamado com {len(printers)} impressora(s)")
+    
+    # Sanitizar configurações antes de salvar
+    sanitized_printers = []
+    for p in printers:
+        sanitized = DataValidator.sanitize_printer_config(p)
+        sanitized_printers.append(sanitized)
+    
     list_ = [
         {
             "device_id": p.get("device_id", ""),
@@ -180,7 +226,7 @@ def set_printers(printers: List[Dict[str, Any]]) -> None:
             "connection_type": p.get("connection_type") or "network",
             "printer_name_local": p.get("printer_name_local") or "",
         }
-        for p in printers
+        for p in sanitized_printers
     ]
     json_data = json.dumps(list_)
     print(f"[DEBUG] JSON a ser salvo: {json_data}")

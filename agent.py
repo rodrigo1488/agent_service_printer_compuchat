@@ -8,6 +8,13 @@ from datetime import datetime
 import db
 from printer_service import PrinterService
 from receipt_formatter import format_order_receipt
+from error_recovery import (
+    retry_with_backoff,
+    RetryConfig,
+    ConnectionHealthChecker,
+    DataValidator,
+    thread_monitor,
+)
 
 try:
     import websocket
@@ -45,6 +52,18 @@ def _handle_print_job(ws, job_id: int, conteudo: dict, printer_config: dict):
     else:
         _log("INFO", f"Job {job_id}: Processando na impressora device_id={device_id}, ip={printer_ip}:{printer_port}")
     
+    # Verificar saúde da conexão antes de imprimir (apenas para rede)
+    if connection_type == "network":
+        if not ConnectionHealthChecker.check_printer_connection(printer_ip, printer_port):
+            error_msg = f"Impressora {printer_ip}:{printer_port} não está acessível"
+            _log("ERROR", f"Job {job_id}: {error_msg}")
+            db.add_print_log(job_id, "error", error_msg)
+            try:
+                ws.send(json.dumps({"event": "ack", "job_id": job_id, "status": "error", "message": error_msg}))
+            except Exception:
+                pass
+            return
+    
     printer = PrinterService(
         printer_ip=printer_ip,
         printer_port=printer_port,
@@ -57,17 +76,32 @@ def _handle_print_job(ws, job_id: int, conteudo: dict, printer_config: dict):
 
     try:
         receipt = format_order_receipt(conteudo)
-        success = printer.print_receipt(receipt)
+        
+        # Retry automático para impressão com backoff exponencial
+        @retry_with_backoff(RetryConfig(
+            max_retries=3,
+            initial_delay=1.0,
+            max_delay=10.0,
+            retryable_exceptions=(Exception,)
+        ))
+        def _print_with_retry():
+            return printer.print_receipt(receipt)
+        
+        success = _print_with_retry()
 
         status = "done" if success else "error"
-        message = "" if success else "Falha ao imprimir"
+        message = "" if success else "Falha ao imprimir após múltiplas tentativas"
 
         db.add_print_log(job_id, status, message)
 
         ack = {"event": "ack", "job_id": job_id, "status": status}
         if message:
             ack["message"] = message
-        ws.send(json.dumps(ack))
+        
+        try:
+            ws.send(json.dumps(ack))
+        except Exception as e:
+            _log("ERROR", f"Erro ao enviar ACK para job {job_id}: {e}")
 
         if success:
             _log("INFO", f"Job {job_id} impresso com sucesso na impressora device_id={device_id}")
@@ -76,7 +110,10 @@ def _handle_print_job(ws, job_id: int, conteudo: dict, printer_config: dict):
     except Exception as e:
         _log("ERROR", f"Job {job_id} erro na impressora device_id={device_id}: {str(e)}")
         db.add_print_log(job_id, "error", str(e))
-        ws.send(json.dumps({"event": "ack", "job_id": job_id, "status": "error", "message": str(e)}))
+        try:
+            ws.send(json.dumps({"event": "ack", "job_id": job_id, "status": "error", "message": str(e)}))
+        except Exception:
+            pass
 
 
 def _make_on_message(printer_config: dict):
@@ -86,6 +123,22 @@ def _make_on_message(printer_config: dict):
             data = json.loads(message)
             event = data.get("event")
             if event == "print_job":
+                # Validar dados antes de processar
+                is_valid, error_msg = DataValidator.validate_print_job(data)
+                if not is_valid:
+                    _log("ERROR", f"Job inválido recebido: {error_msg}")
+                    try:
+                        job_id = data.get("job_id", 0)
+                        ws.send(json.dumps({
+                            "event": "ack",
+                            "job_id": job_id,
+                            "status": "error",
+                            "message": f"Dados inválidos: {error_msg}"
+                        }))
+                    except Exception:
+                        pass
+                    return
+                
                 job_id = data.get("job_id")
                 conteudo = data.get("conteudo", {})
                 if job_id is not None and conteudo:
@@ -95,7 +148,7 @@ def _make_on_message(printer_config: dict):
             elif event == "ready":
                 _log("INFO", f"Conectado ao SaaS (device_id={printer_config.get('device_id', '')}) - pronto para receber jobs")
         except json.JSONDecodeError as e:
-            _log("ERROR", f"Mensagem inválida: {e}")
+            _log("ERROR", f"Mensagem inválida (JSON): {e}")
         except Exception as e:
             _log("ERROR", f"Erro ao processar mensagem: {e}")
     return _on_message
@@ -139,11 +192,17 @@ def _run_websocket(printer_config: dict):
         _log("WARN", f"Impressora sem ws_url/token/device_id (device_id={device_id or 'vazio'}). Configure em http://localhost:5000/")
         return
     
+    # Validar URL WebSocket antes de conectar
+    if not ConnectionHealthChecker.check_websocket_url(ws_url):
+        _log("WARN", f"URL WebSocket {ws_url} não está acessível. Tentando conectar mesmo assim...")
+    
     # Log das credenciais (sem expor o token completo por segurança)
     _log("INFO", f"Credenciais para device_id={device_id}: token_length={len(token)}, token_preview={token[:20] if len(token) > 20 else token}...")
 
     retry_delay = 1
     max_retry_delay = 60
+    consecutive_failures = 0
+    max_consecutive_failures = 10
     on_message = _make_on_message(printer_config)
 
     while not _should_stop:
@@ -168,8 +227,15 @@ def _run_websocket(printer_config: dict):
                 ping_interval=30,
                 ping_timeout=10,
             )
+            consecutive_failures = 0  # Reset contador em caso de sucesso
         except Exception as e:
-            _log("ERROR", f"Erro de conexão (device_id={device_id}): {e}")
+            consecutive_failures += 1
+            _log("ERROR", f"Erro de conexão (device_id={device_id}): {e} (falhas consecutivas: {consecutive_failures})")
+            
+            # Se muitas falhas consecutivas, aumentar delay
+            if consecutive_failures >= max_consecutive_failures:
+                _log("WARN", f"Muitas falhas consecutivas ({consecutive_failures}). Aumentando delay de reconexão...")
+                retry_delay = min(retry_delay * 2, max_retry_delay)
 
         if _should_stop:
             break
@@ -199,16 +265,42 @@ def start_agent_thread():
         _log("WARN", "Configure a URL WebSocket (Conexão SaaS) em http://localhost:5000/")
         return
 
+    # Iniciar monitor de threads se ainda não estiver rodando
+    if not thread_monitor.monitor_thread or not thread_monitor.monitor_thread.is_alive():
+        thread_monitor.start()
+
     for p in printers:
         if not p.get("device_id") or not p.get("token"):
             continue
-        t = threading.Thread(target=_run_websocket, args=(p,), daemon=True)
-        t.start()
+        
+        device_id = p.get("device_id")
+        
+        def create_thread_for_printer(printer_config):
+            """Cria uma nova thread para a impressora."""
+            t = threading.Thread(target=_run_websocket, args=(printer_config,), daemon=True)
+            t.start()
+            return t
+        
+        t = create_thread_for_printer(p)
         _agent_threads.append(t)
-        _log("INFO", f"Thread iniciada para device_id={p.get('device_id')}")
+        
+        # Registrar thread no monitor para auto-restart
+        def restart_callback():
+            return create_thread_for_printer(p)
+        
+        thread_monitor.register_thread(
+            f"websocket_{device_id}",
+            t,
+            restart_callback,
+            max_restarts=5,
+            restart_delay=5.0
+        )
+        
+        _log("INFO", f"Thread iniciada para device_id={device_id} (monitorada)")
 
 
 def stop_agent():
     """Sinaliza o agent para parar (na próxima desconexão)."""
     global _should_stop
     _should_stop = True
+    thread_monitor.stop()

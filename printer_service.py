@@ -3,6 +3,12 @@ import http.client
 import json
 from datetime import datetime
 
+from error_recovery import (
+    retry_with_backoff,
+    RetryConfig,
+    EncodingFallback,
+)
+
 # Tentar importar win32print para impressoras locais (Windows)
 try:
     import win32print
@@ -186,28 +192,47 @@ class PrinterService:
             return b'\x1B\x74\x10', 'cp1252'  # Windows Latin-1
         # utf8: alguns modelos aceitam com ESC t 16
         return b'\x1B\x74\x10', 'utf-8'
+    
+    def _encode_text_with_fallback(self, text: str) -> bytes:
+        """Codifica texto com fallback automático de encoding."""
+        _, preferred_encoding = self._get_esc_pos_encoding()
+        text_bytes, used_encoding = EncodingFallback.encode_with_fallback(text, preferred_encoding)
+        if used_encoding != preferred_encoding:
+            print(f"[WARN] Encoding {preferred_encoding} falhou, usando {used_encoding} como fallback")
+        return text_bytes
 
     def _print_via_raw(self, text, qr_bytes=b""):
         """Imprime via socket RAW (porta 9100). qr_bytes: opcional, QR ESC/POS."""
-        try:
+        @retry_with_backoff(RetryConfig(
+            max_retries=2,
+            initial_delay=0.5,
+            max_delay=5.0,
+            retryable_exceptions=(socket.timeout, socket.error, ConnectionError)
+        ))
+        def _send_to_printer():
             esc_encoding, encoding = self._get_esc_pos_encoding()
-            text_bytes = text.encode(encoding, errors="replace")
+            # Usar fallback de encoding
+            text_bytes = self._encode_text_with_fallback(text)
             esc_pos_reset = b"\x1B\x40"
             esc_pos_cut = b"\x1D\x56\x00"
             full_command = esc_pos_reset + esc_encoding + text_bytes + qr_bytes + esc_pos_cut
             
-            # Conectar e enviar
+            # Conectar e enviar com timeout maior
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(5)
-            sock.connect((self.printer_ip, self.printer_port))
-            sock.sendall(full_command)
-            sock.close()
+            sock.settimeout(10)  # Aumentado de 5 para 10 segundos
+            try:
+                sock.connect((self.printer_ip, self.printer_port))
+                sock.sendall(full_command)
+            finally:
+                sock.close()
             
             print(f"Pedido impresso com sucesso na impressora {self.printer_ip}:{self.printer_port}")
             return True
-            
+        
+        try:
+            return _send_to_printer()
         except socket.timeout:
-            print(f"Timeout ao conectar na impressora {self.printer_ip}:{self.printer_port}")
+            print(f"Timeout ao conectar na impressora {self.printer_ip}:{self.printer_port} após múltiplas tentativas")
             return False
         except socket.error as e:
             print(f"Erro de conexão com impressora {self.printer_ip}:{self.printer_port}: {str(e)}")
@@ -276,9 +301,15 @@ class PrinterService:
             print("Erro: Nome da impressora local não especificado.")
             return False
         
-        try:
-            _, encoding = self._get_esc_pos_encoding()
-            text_bytes = text.encode(encoding, errors="replace")
+        @retry_with_backoff(RetryConfig(
+            max_retries=2,
+            initial_delay=1.0,
+            max_delay=5.0,
+            retryable_exceptions=(Exception,)
+        ))
+        def _send_to_local_printer():
+            # Usar fallback de encoding
+            text_bytes = self._encode_text_with_fallback(text)
             
             # Comando ESC/POS para cortar papel: GS V 0 (corte total)
             # 0x1D = GS (Group Separator)
@@ -310,7 +341,9 @@ class PrinterService:
             
             print(f"Pedido impresso com sucesso na impressora local: {self.printer_name_local}")
             return True
-            
+        
+        try:
+            return _send_to_local_printer()
         except Exception as e:
             print(f"Erro ao imprimir na impressora local {self.printer_name_local}: {str(e)}")
             return False

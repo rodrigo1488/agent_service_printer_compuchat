@@ -2,11 +2,13 @@
 import os
 import sys
 import threading
+from datetime import datetime
 from flask import Flask, request, redirect, url_for, render_template, jsonify
 from flask_cors import CORS
 
 import db
 from agent import start_agent_thread, stop_agent
+from error_recovery import DataValidator, DatabaseRecovery
 
 # Tentar importar win32print para listar impressoras locais (Windows)
 try:
@@ -28,6 +30,11 @@ app.config["SECRET_KEY"] = "print-agent-secret"
 
 # Inicializar banco na importação
 db.init_db()
+
+# Validar banco de dados na inicialização
+if not DatabaseRecovery.validate_db_connection(db.DB_FILE):
+    print("[WARN] Problema detectado no banco de dados. Criando backup...")
+    DatabaseRecovery.backup_db(db.DB_FILE)
 
 
 def _config_context():
@@ -96,6 +103,8 @@ def config():
                     printer_data["printer_port"] = int(request.form.get(prefix + "printer_port", "9100").strip() or "9100")
                     printer_data["printer_name_local"] = ""
                 
+                # Sanitizar dados antes de adicionar
+                printer_data = DataValidator.sanitize_printer_config(printer_data)
                 printers.append(printer_data)
                 print(f"[DEBUG] Impressora {idx} adicionada: {printer_data}")
             print(f"[DEBUG] Salvando {len(printers)} impressora(s): {printers}")
@@ -122,7 +131,57 @@ def config():
 @app.route("/health", methods=["GET"])
 def health():
     """Health check para monitoramento."""
-    return jsonify({"status": "ok", "message": "Print Agent is running"}), 200
+    from error_recovery import ConnectionHealthChecker, thread_monitor
+    from agent import _agent_threads
+    
+    health_status = {
+        "status": "ok",
+        "message": "Print Agent is running",
+        "timestamp": datetime.now().isoformat(),
+        "database": {
+            "status": "ok" if DatabaseRecovery.validate_db_connection(db.DB_FILE) else "error"
+        },
+        "threads": {
+            "total": len(_agent_threads),
+            "alive": sum(1 for t in _agent_threads if t.is_alive()),
+            "monitored": len(thread_monitor.monitored_threads) if hasattr(thread_monitor, 'monitored_threads') else 0
+        },
+        "printers": {
+            "configured": len(db.get_printers()),
+            "active": sum(1 for p in db.get_printers() if p.get("device_id") and p.get("token"))
+        }
+    }
+    
+    # Verificar conectividade das impressoras configuradas
+    printers = db.get_printers()
+    printer_health = []
+    for p in printers:
+        if p.get("connection_type") == "network":
+            printer_ip = p.get("printer_ip", "")
+            printer_port = p.get("printer_port", 9100)
+            is_accessible = ConnectionHealthChecker.check_printer_connection(printer_ip, printer_port) if printer_ip else False
+            printer_health.append({
+                "device_id": p.get("device_id", ""),
+                "connection_type": "network",
+                "accessible": is_accessible
+            })
+        else:
+            printer_health.append({
+                "device_id": p.get("device_id", ""),
+                "connection_type": "local",
+                "accessible": True  # Assumir OK para locais (verificação mais complexa)
+            })
+    
+    health_status["printers"]["health"] = printer_health
+    
+    # Determinar status geral
+    if health_status["database"]["status"] != "ok":
+        health_status["status"] = "degraded"
+    if health_status["threads"]["alive"] < health_status["threads"]["total"]:
+        health_status["status"] = "degraded"
+    
+    status_code = 200 if health_status["status"] == "ok" else 503
+    return jsonify(health_status), status_code
 
 
 @app.route("/logs")
