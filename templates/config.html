@@ -97,6 +97,16 @@
             <button type="button" id="add-printer">Adicionar impressora</button>
         </div>
     </fieldset>
+
+    <fieldset style="margin-top: 1.5rem;">
+        <legend style="margin-bottom: 0.5rem; font-weight: 600;">Comportamento</legend>
+        <div class="form-group" style="display: flex; align-items: center; gap: 0.5rem;">
+            <input type="checkbox" id="restart_service_on_save" name="restart_service_on_save" value="1" {% if restart_service_on_save %}checked{% endif %}>
+            <label for="restart_service_on_save" style="margin: 0;">Reiniciar serviço ao salvar</label>
+        </div>
+        <p style="color:#666; font-size: 0.85rem; margin-top: 0.25rem;">Quando marcado, ao salvar a configuração o agente (conexão WebSocket) é reiniciado para aplicar as alterações.</p>
+    </fieldset>
+
     <div style="margin-top: 1.5rem;">
         <button type="submit">Salvar configuração</button>
     </div>
