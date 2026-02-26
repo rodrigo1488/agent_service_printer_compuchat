@@ -1,6 +1,24 @@
 {% extends "base.html" %}
 {% block title %}Configuração - Print Agent{% endblock %}
 {% block content %}
+<style>
+    .container { max-width: 980px; }
+    .printers-grid { display: grid; grid-template-columns: 1fr; gap: 1rem; }
+    .printer-card { border: 1px solid #e5e7eb; border-radius: 10px; padding: 1rem; background: #fafafa; }
+    .printer-card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.75rem; }
+    .printer-card-title { font-size: 1rem; font-weight: 600; color: #111827; margin: 0; }
+    .printer-card-badge { font-size: 0.75rem; color: #374151; background: #e5e7eb; padding: 0.2rem 0.5rem; border-radius: 999px; }
+    .printer-grid-two { display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; }
+    .printer-actions { display: flex; gap: 0.5rem; margin-top: 0.5rem; flex-wrap: wrap; }
+    .btn-secondary { background: #16a34a; }
+    .btn-secondary:hover { background: #15803d; }
+    .btn-remove { background: #dc2626; }
+    .btn-remove:hover { background: #b91c1c; }
+
+    @media (max-width: 768px) {
+        .printer-grid-two { grid-template-columns: 1fr; }
+    }
+</style>
 <h1>Configuração do Print Agent</h1>
 {% if message %}
 <div class="alert {{ 'alert-success' if message_type == 'success' else 'alert-error' }}">{{ message }}</div>
@@ -17,12 +35,14 @@
     <fieldset>
         <legend style="margin-bottom: 0.5rem; font-weight: 600;">Impressoras</legend>
         <p style="color:#666; font-size: 0.9rem;">Cada impressora corresponde a um dispositivo (Device ID + Token) no SaaS e a uma impressora física (IP/porta). As impressoras são cadastradas no sistema (banco de dados); aqui você associa cada uma ao IP da impressora local.</p>
-        <div id="printers-container">
+        <div id="printers-container" class="printers-grid">
             {% for p in printers %}
-            <div class="printer-block" data-index="{{ loop.index0 }}">
-                <hr style="margin: 1rem 0;">
-                <h3 style="font-size: 1rem; margin-bottom: 0.5rem;">Impressora {{ loop.index }}</h3>
-                <div class="form-row" style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem;">
+            <div class="printer-block printer-card" data-index="{{ loop.index0 }}">
+                <div class="printer-card-header">
+                    <h3 class="printer-card-title">Impressora {{ loop.index }}</h3>
+                    <span class="printer-card-badge">Dispositivo</span>
+                </div>
+                <div class="form-row printer-grid-two">
                     <div class="form-group">
                         <label>Device ID</label>
                         <input type="text" name="printer_{{ loop.index0 }}_device_id" value="{{ p.device_id }}" placeholder="ex: cozinha-01">
@@ -44,7 +64,7 @@
                     </select>
                 </div>
                 <div class="network-config" id="network-config-{{ loop.index0 }}" style="{% if p.get('connection_type') == 'local' %}display: none;{% endif %}">
-                    <div class="form-row" style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem;">
+                    <div class="form-row printer-grid-two">
                         <div class="form-group">
                             <label>IP da impressora</label>
                             <input type="text" name="printer_{{ loop.index0 }}_printer_ip" value="{{ p.printer_ip }}">
@@ -86,8 +106,8 @@
                 <option value="utf8" {% if p.printer_encoding == 'utf8' %}selected{% endif %}>UTF-8</option>
             </select>
         </div>
-        <div style="display: flex; gap: 0.5rem; margin-top: 0.5rem;">
-            <button type="button" class="btn-test-printer" data-index="{{ loop.index0 }}" style="background: #28a745; color: white; border: none; padding: 0.5rem 1rem; border-radius: 4px; cursor: pointer;">Testar Impressora</button>
+        <div class="printer-actions">
+            <button type="button" class="btn-test-printer btn-secondary" data-index="{{ loop.index0 }}">Testar Impressora</button>
             <button type="button" class="btn-remove" aria-label="Remover impressora">Remover</button>
         </div>
             </div>
@@ -113,10 +133,12 @@
 </form>
 
 <template id="printer-block-tpl">
-    <div class="printer-block" data-index="">
-        <hr style="margin: 1rem 0;">
-        <h3 style="font-size: 1rem; margin-bottom: 0.5rem;">Impressora <span class="printer-num"></span></h3>
-        <div class="form-row" style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem;">
+    <div class="printer-block printer-card" data-index="">
+        <div class="printer-card-header">
+            <h3 class="printer-card-title">Impressora <span class="printer-num"></span></h3>
+            <span class="printer-card-badge">Dispositivo</span>
+        </div>
+        <div class="form-row printer-grid-two">
             <div class="form-group">
                 <label>Device ID</label>
                 <input type="text" name="printer_X_device_id" placeholder="ex: cozinha-01">
@@ -138,7 +160,7 @@
             </select>
         </div>
         <div class="network-config" id="network-config-X">
-            <div class="form-row" style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem;">
+            <div class="form-row printer-grid-two">
                 <div class="form-group">
                     <label>IP da impressora</label>
                     <input type="text" name="printer_X_printer_ip" value="192.168.1.100">
@@ -180,8 +202,8 @@
                 <option value="utf8">UTF-8</option>
             </select>
         </div>
-        <div style="display: flex; gap: 0.5rem; margin-top: 0.5rem;">
-            <button type="button" class="btn-test-printer" data-index="X" style="background: #28a745; color: white; border: none; padding: 0.5rem 1rem; border-radius: 4px; cursor: pointer;">Testar Impressora</button>
+        <div class="printer-actions">
+            <button type="button" class="btn-test-printer btn-secondary" data-index="X">Testar Impressora</button>
             <button type="button" class="btn-remove" aria-label="Remover impressora">Remover</button>
         </div>
     </div>
