@@ -151,6 +151,9 @@ Obrigado pela preferência!
 
 ## Solução de Problemas
 
+### Erro SSL: CERTIFICATE_VERIFY_FAILED
+O agente desativa a verificação do certificado SSL na conexão WebSocket (apenas para essa conexão), para funcionar com servidor que usa certificado autoassinado. Configurado diretamente em `agent.py` (`SSLOPT_WS`).
+
 ### Impressora não imprime
 1. Verifique se o IP está correto
 2. Teste a conectividade: `ping IP_DA_IMPRESSORA`

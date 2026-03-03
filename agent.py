@@ -1,8 +1,9 @@
 """Cliente WebSocket para o Print Agent - conecta ao SaaS e processa jobs de impressão."""
 import json
+import logging
+import ssl
 import threading
 import time
-import logging
 from datetime import datetime
 
 import db
@@ -37,6 +38,9 @@ _active_websockets_lock = threading.Lock()
 # Janela de tolerÃ¢ncia para quedas momentÃ¢neas da impressora/rede
 PRINTER_RECOVERY_WAIT_SECONDS = 90
 PRINTER_RECOVERY_CHECK_INTERVAL = 5
+
+# WebSocket: não verificar certificado SSL (evita CERTIFICATE_VERIFY_FAILED com servidor com cert autoassinado).
+SSLOPT_WS = {"cert_reqs": ssl.CERT_NONE}
 
 
 def _log(level: str, msg: str):
@@ -303,6 +307,7 @@ def _run_websocket(printer_config: dict):
                 ws.run_forever(
                     ping_interval=30,
                     ping_timeout=10,
+                    sslopt=SSLOPT_WS,
                 )
             finally:
                 _unregister_websocket(device_id, ws)
