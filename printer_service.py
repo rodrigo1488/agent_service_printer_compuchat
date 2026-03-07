@@ -25,6 +25,31 @@ except ImportError:
 QR_MODULE_SIZE = 10
 
 
+def _wrap_text_by_words(text: str, max_width: int) -> list:
+    """Quebra texto por palavras para não cortar no meio; retorna lista de linhas."""
+    if not text or max_width <= 0:
+        return [text] if text else []
+    text = text.strip()
+    words = text.split()
+    if not words:
+        return []
+    lines = []
+    current = []
+    current_len = 0
+    for w in words:
+        need = len(w) + (1 if current else 0)
+        if current and current_len + need > max_width:
+            lines.append(" ".join(current))
+            current = [w]
+            current_len = len(w)
+        else:
+            current.append(w)
+            current_len = current_len + need if current_len else len(w)
+    if current:
+        lines.append(" ".join(current))
+    return lines
+
+
 def _escpos_qr_bytes(url: str) -> bytes:
     """Gera bytes ESC/POS para imprimir QR code (URL para entregador), tamanho legível."""
     if not url or len(url) > 400:
@@ -124,21 +149,35 @@ class PrinterService:
         lines.append("-" * W)
         lines.append("")
 
-        # Itens agrupados por grupo
+        # Itens agrupados por grupo (nome em uma linha; só qty e total, sem preço unitário)
+        name_width = max(W - 14, 12)  # espaço à direita para "  Nx R$ XX,XX"
         for grupo, items in receipt['items_by_group'].items():
             lines.append(f"* {grupo.upper()[:W-4]} *")
             lines.append("")
 
             for item in items:
-                name = item['name']
-                if len(name) > 14:
-                    lines.append(name[:14])
-                    name = "  " + name[14:]
-                qty_str = f"{item['quantity']}x"
-                unit_str = f"R${item['value']:.2f}".replace(".", ",")[:7]
-                total_str = f"R${item['total']:.2f}".replace(".", ",")[:8]
-                line = f"{name:<14} {qty_str:>3}{unit_str:>7}{total_str:>8}"
+                name = (item.get('name') or 'Item').strip()
+                name_one_line = (name[: name_width - 2] + "..") if len(name) > name_width else name
+                qty = item.get('quantity', 1) or 1
+                addons = item.get('addons') or []
+                # Valor unitário "seco" do produto (sem adicionais)
+                unit_full = float(item.get('value', 0) or 0)
+                addons_sum = sum(float(a.get('value', 0) or 0) for a in addons)
+                base_unit = unit_full - addons_sum
+                total_seco = round(base_unit * qty, 2)
+                total_str = f"R$ {total_seco:.2f}".replace(".", ",")
+                right_part = f" {qty}x {total_str}"
+                if len(right_part) <= 14:
+                    right_part = right_part.rjust(14)
+                line = (name_one_line[:name_width].ljust(name_width)) + right_part
                 lines.append(line[:W])
+                # Adicionais com valor
+                for addon in addons:
+                    addon_label = (addon.get('label') or 'Adicional').strip()
+                    addon_val = float(addon.get('value', 0) or 0)
+                    addon_str = f" R$ {addon_val:.2f}".replace(".", ",")
+                    addon_one = ("  + " + addon_label)[:W - len(addon_str)].ljust(W - len(addon_str)) + addon_str
+                    lines.append(addon_one[:W])
 
             lines.append("")
 
@@ -150,6 +189,26 @@ class PrinterService:
             lines.append("OBS:")
             for key, value in receipt['custom_info'].items():
                 lines.append(f" {key}: {str(value)[:W-4]}")
+            lines.append("")
+
+        # Taxa de entrega (pedidos delivery): mostrar sempre que for delivery ou valor > 0
+        delivery_fee = float(receipt.get("delivery_fee") or 0)
+        if delivery_fee <= 0 and receipt.get("delivery_scan_url"):
+            # Pedido delivery mas taxa não veio no payload: inferir por total - subtotal
+            sub = float(receipt.get("subtotal") or 0)
+            tot = float(receipt.get("total") or 0)
+            if tot > sub:
+                delivery_fee = round(tot - sub, 2)
+        if delivery_fee > 0 or receipt.get("delivery_scan_url"):
+            subtotal_val = receipt.get("subtotal")
+            if subtotal_val is None:
+                subtotal_val = (receipt.get("total") or 0) - delivery_fee
+            subtotal_str = f"R$ {float(subtotal_val):.2f}".replace(".", ",")
+            fee_str = f"R$ {delivery_fee:.2f}".replace(".", ",")
+            lines.append("SUBTOTAL:")
+            lines.append(f" {subtotal_str:>{W-1}}")
+            lines.append("TAXA ENTREGA:")
+            lines.append(f" {fee_str:>{W-1}}")
             lines.append("")
 
         # Total
