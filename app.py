@@ -42,7 +42,25 @@ def _config_context():
     ws_url = db.get_config("ws_url")
     printers = db.get_printers()
     restart_on_save = (db.get_config("restart_service_on_save") or "true").lower() == "true"
-    return {"ws_url": ws_url, "printers": printers, "restart_service_on_save": restart_on_save}
+    uniplus_enabled = (db.get_config("uniplus_enabled") or "false").lower() in ("true", "1", "yes", "on")
+    uniplus_connection_string = db.get_config("uniplus_connection_string") or ""
+    uniplus_produto_table = db.get_config("uniplus_produto_table") or "produto"
+    uniplus_produto_codigo_column = db.get_config("uniplus_produto_codigo_column") or "codigo"
+    uniplus_produto_id_column = db.get_config("uniplus_produto_id_column") or "id"
+    uniplus_contamesa_table = db.get_config("uniplus_contamesa_table") or "contamesa"
+    uniplus_contamesaitem_table = db.get_config("uniplus_contamesaitem_table") or "contamesaitem"
+    return {
+        "ws_url": ws_url,
+        "printers": printers,
+        "restart_service_on_save": restart_on_save,
+        "uniplus_enabled": uniplus_enabled,
+        "uniplus_connection_string": uniplus_connection_string,
+        "uniplus_produto_table": uniplus_produto_table,
+        "uniplus_produto_codigo_column": uniplus_produto_codigo_column,
+        "uniplus_produto_id_column": uniplus_produto_id_column,
+        "uniplus_contamesa_table": uniplus_contamesa_table,
+        "uniplus_contamesaitem_table": uniplus_contamesaitem_table,
+    }
 
 
 @app.route("/")
@@ -62,6 +80,35 @@ def config():
             ws_url = request.form.get("ws_url", "").strip()
             if ws_url:
                 db.set_config("ws_url", ws_url)
+
+            # UniPlus Gourmet (Postgres local)
+            uniplus_enabled = request.form.get("uniplus_enabled", "").lower() in ("true", "1", "on", "yes")
+            db.set_config("uniplus_enabled", "true" if uniplus_enabled else "false")
+            db.set_config(
+                "uniplus_connection_string",
+                request.form.get("uniplus_connection_string", "").strip(),
+            )
+            db.set_config(
+                "uniplus_produto_table",
+                request.form.get("uniplus_produto_table", "produto").strip() or "produto",
+            )
+            db.set_config(
+                "uniplus_produto_codigo_column",
+                request.form.get("uniplus_produto_codigo_column", "codigo").strip() or "codigo",
+            )
+            db.set_config(
+                "uniplus_produto_id_column",
+                request.form.get("uniplus_produto_id_column", "id").strip() or "id",
+            )
+            db.set_config(
+                "uniplus_contamesa_table",
+                request.form.get("uniplus_contamesa_table", "contamesa").strip() or "contamesa",
+            )
+            db.set_config(
+                "uniplus_contamesaitem_table",
+                request.form.get("uniplus_contamesaitem_table", "contamesaitem").strip()
+                or "contamesaitem",
+            )
 
             # Montar lista de impressoras: printer_0_device_id, printer_0_token, ...
             indices = []

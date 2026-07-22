@@ -28,7 +28,47 @@
         <legend style="margin-bottom: 0.5rem; font-weight: 600;">Conexão SaaS</legend>
         <div class="form-group">
             <label for="ws_url">URL WebSocket</label>
-            <input type="url" id="ws_url" name="ws_url" value="{{ ws_url }}" placeholder="wss://api.dominio.com/ws/print">
+            <input type="url" id="ws_url" name="ws_url" value="{{ ws_url }}" placeholder="ws://localhost:4000/ws/print">
+            <p style="color:#666; font-size: 0.85rem; margin-top: 0.35rem;">Local: <code>ws://localhost:4000/ws/print</code> (porta do backend Compuchat)</p>
+        </div>
+    </fieldset>
+
+    <fieldset style="margin-bottom: 1.5rem;">
+        <legend style="margin-bottom: 0.5rem; font-weight: 600;">UniPlus Gourmet (Postgres local)</legend>
+        <p style="color:#666; font-size: 0.9rem;">Quando o Compuchat enviar <code>uniplus_job</code>, o agente grava a entrega em CONTAMESA/CONTAMESAITEM.</p>
+        <div class="form-group">
+            <label>
+                <input type="checkbox" name="uniplus_enabled" value="on" {% if uniplus_enabled %}checked{% endif %}>
+                Ativar UniPlus neste agente
+            </label>
+        </div>
+        <div class="form-group">
+            <label for="uniplus_connection_string">Connection string Postgres</label>
+            <input type="text" id="uniplus_connection_string" name="uniplus_connection_string"
+                   value="{{ uniplus_connection_string }}"
+                   placeholder="postgresql://user:pass@127.0.0.1:5432/unico">
+        </div>
+        <div class="form-row printer-grid-two">
+            <div class="form-group">
+                <label>Tabela produto</label>
+                <input type="text" name="uniplus_produto_table" value="{{ uniplus_produto_table }}">
+            </div>
+            <div class="form-group">
+                <label>Coluna código produto</label>
+                <input type="text" name="uniplus_produto_codigo_column" value="{{ uniplus_produto_codigo_column }}">
+            </div>
+            <div class="form-group">
+                <label>Coluna id produto</label>
+                <input type="text" name="uniplus_produto_id_column" value="{{ uniplus_produto_id_column }}">
+            </div>
+            <div class="form-group">
+                <label>Tabela contamesa</label>
+                <input type="text" name="uniplus_contamesa_table" value="{{ uniplus_contamesa_table }}">
+            </div>
+            <div class="form-group">
+                <label>Tabela contamesaitem</label>
+                <input type="text" name="uniplus_contamesaitem_table" value="{{ uniplus_contamesaitem_table }}">
+            </div>
         </div>
     </fieldset>
 

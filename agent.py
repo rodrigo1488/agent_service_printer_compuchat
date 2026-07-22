@@ -16,6 +16,7 @@ from error_recovery import (
     DataValidator,
     thread_monitor,
 )
+from uniplus_handler import handle_uniplus_job, is_uniplus_enabled
 
 try:
     import websocket
@@ -87,8 +88,45 @@ def _get_latest_printer_config(device_id: str, fallback_config: dict) -> dict:
     return fallback_config
 
 
+def _handle_uniplus_job(ws, job_id: int, conteudo: dict):
+    """Processa job UniPlus (INSERT CONTAMESA) e envia ACK."""
+    _log("INFO", f"Job {job_id}: processando uniplus_job...")
+    try:
+        if not is_uniplus_enabled(db):
+            raise RuntimeError(
+                "UniPlus desabilitado ou sem connection string. Configure em http://localhost:5000/"
+            )
+        conta_id, message = handle_uniplus_job(db, conteudo or {})
+        db.add_print_log(job_id, "done", f"uniplus {message} conta={conta_id}")
+        ack = {
+            "event": "ack",
+            "job_id": job_id,
+            "status": "done",
+            "message": message,
+            "uniplusContaId": conta_id,
+        }
+        ws.send(json.dumps(ack))
+        _log("INFO", f"Job {job_id}: UniPlus ok contaId={conta_id} ({message})")
+    except Exception as e:
+        _log("ERROR", f"Job {job_id}: UniPlus erro: {e}")
+        db.add_print_log(job_id, "error", str(e))
+        try:
+            ws.send(
+                json.dumps(
+                    {
+                        "event": "ack",
+                        "job_id": job_id,
+                        "status": "error",
+                        "message": str(e),
+                    }
+                )
+            )
+        except Exception:
+            pass
+
+
 def _handle_print_job(ws, job_id: int, conteudo: dict, printer_config: dict):
-    """Processa um job de impressÃ£o usando a impressora indicada em printer_config."""
+    """Processa um job de impressão usando a impressora indicada em printer_config."""
     initial_device_id = (printer_config.get("device_id") or "").strip()
     latest_config = _get_latest_printer_config(initial_device_id, printer_config)
 
@@ -208,7 +246,7 @@ def _make_on_message(printer_config: dict):
                 job_id = data.get("job_id")
                 conteudo = data.get("conteudo", {})
                 if job_id is not None and conteudo:
-                    # Processar em thread separada para nÃ£o bloquear loop WebSocket.
+                    # Processar em thread separada para não bloquear loop WebSocket.
                     threading.Thread(
                         target=_handle_print_job,
                         args=(ws, job_id, conteudo, printer_config),
@@ -217,6 +255,18 @@ def _make_on_message(printer_config: dict):
                     ).start()
                 else:
                     _log("WARN", "print_job recebido sem job_id ou conteudo")
+            elif event == "uniplus_job":
+                job_id = data.get("job_id")
+                conteudo = data.get("conteudo", {})
+                if job_id is not None and conteudo:
+                    threading.Thread(
+                        target=_handle_uniplus_job,
+                        args=(ws, job_id, conteudo),
+                        daemon=True,
+                        name=f"uniplus_job_{job_id}",
+                    ).start()
+                else:
+                    _log("WARN", "uniplus_job recebido sem job_id ou conteudo")
             elif event == "ready":
                 _log("INFO", f"Conectado ao SaaS (device_id={printer_config.get('device_id', '')}) - pronto para receber jobs")
         except json.JSONDecodeError as e:

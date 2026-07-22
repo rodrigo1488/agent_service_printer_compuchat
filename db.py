@@ -18,10 +18,17 @@ DEFAULT_CONFIG = {
     "printer_type": "raw",
     "paper_width": "32",
     "printer_encoding": "cp850",
-    "ws_url": "wss://api.dominio.com/ws/print",
+    "ws_url": "ws://localhost:4000/ws/print",
     "token": "",
     "device_id": "",
     "restart_service_on_save": "true",
+    "uniplus_enabled": "false",
+    "uniplus_connection_string": "",
+    "uniplus_produto_table": "produto",
+    "uniplus_produto_codigo_column": "codigo",
+    "uniplus_produto_id_column": "id",
+    "uniplus_contamesa_table": "contamesa",
+    "uniplus_contamesaitem_table": "contamesaitem",
 }
 PRINTER_KEYS = ("device_id", "token", "printer_ip", "printer_port", "printer_type", "paper_width", "printer_encoding", "name", "connection_type", "printer_name_local")
 
@@ -67,6 +74,14 @@ def init_db():
             for key, value in DEFAULT_CONFIG.items():
                 conn.execute(
                     "INSERT INTO config (key, value) VALUES (?, ?)",
+                    (key, str(value)),
+                )
+            conn.commit()
+        else:
+            # Garante chaves novas (ex.: UniPlus) em bancos já existentes
+            for key, value in DEFAULT_CONFIG.items():
+                conn.execute(
+                    "INSERT OR IGNORE INTO config (key, value) VALUES (?, ?)",
                     (key, str(value)),
                 )
             conn.commit()
