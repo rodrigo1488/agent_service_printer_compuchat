@@ -1,80 +1,78 @@
 {% extends "base.html" %}
 {% block title %}Configuração - Print Agent{% endblock %}
-{% block content %}
+{% block extra_css %}
 <style>
-    .container { max-width: 980px; }
-    .printers-grid { display: grid; grid-template-columns: 1fr; gap: 1rem; }
-    .printer-card { border: 1px solid #e5e7eb; border-radius: 10px; padding: 1rem; background: #fafafa; }
-    .printer-card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.75rem; }
-    .printer-card-title { font-size: 1rem; font-weight: 600; color: #111827; margin: 0; }
-    .printer-card-badge { font-size: 0.75rem; color: #374151; background: #e5e7eb; padding: 0.2rem 0.5rem; border-radius: 999px; }
-    .printer-grid-two { display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; }
-    .printer-actions { display: flex; gap: 0.5rem; margin-top: 0.5rem; flex-wrap: wrap; }
-    .btn-secondary { background: #16a34a; }
-    .btn-secondary:hover { background: #15803d; }
-    .btn-remove { background: #dc2626; }
-    .btn-remove:hover { background: #b91c1c; }
-
-    @media (max-width: 768px) {
-        .printer-grid-two { grid-template-columns: 1fr; }
+    .printers-grid { display: grid; gap: 0.9rem; }
+    .printer-card {
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        padding: 1rem;
+        background: linear-gradient(180deg, #fbfcfd 0%, #f6f9fb 100%);
     }
+    .printer-card-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 0.85rem;
+        gap: 0.5rem;
+    }
+    .printer-card-title { font-size: 1rem; font-weight: 700; margin: 0; }
+    .printer-card-badge {
+        font-size: 0.72rem;
+        color: #155e75;
+        background: #e0f2fe;
+        padding: 0.2rem 0.55rem;
+        border-radius: 999px;
+        font-weight: 700;
+    }
+    .printer-actions { display: flex; gap: 0.5rem; margin-top: 0.75rem; flex-wrap: wrap; }
+    .section-card {
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        padding: 1rem;
+        background: #fafcfd;
+        margin-bottom: 0.9rem;
+    }
+    .check-row {
+        display: flex;
+        align-items: center;
+        gap: 0.55rem;
+    }
+    .check-row input { width: auto; }
+    .check-row label { margin: 0; font-weight: 600; }
 </style>
-<h1>Configuração do Print Agent</h1>
+{% endblock %}
+{% block content %}
+<h2 class="page-title">Configuração</h2>
+<p class="page-sub">Organize conexão, impressoras e UniPlus em abas. Alterações só valem após salvar.</p>
+
 {% if message %}
 <div class="alert {{ 'alert-success' if message_type == 'success' else 'alert-error' }}">{{ message }}</div>
 {% endif %}
+
 <form method="post" action="/config" id="config-form">
-    <fieldset style="margin-bottom: 1.5rem;">
-        <legend style="margin-bottom: 0.5rem; font-weight: 600;">Conexão SaaS</legend>
-        <div class="form-group">
-            <label for="ws_url">URL WebSocket</label>
-            <input type="url" id="ws_url" name="ws_url" value="{{ ws_url }}" placeholder="ws://localhost:4000/ws/print">
-            <p style="color:#666; font-size: 0.85rem; margin-top: 0.35rem;">Local: <code>ws://localhost:4000/ws/print</code> (porta do backend Compuchat)</p>
-        </div>
-    </fieldset>
+    <div class="tabs" role="tablist">
+        <button type="button" class="tab-btn active" data-tab="conexao">Conexão</button>
+        <button type="button" class="tab-btn" data-tab="impressoras">Impressoras</button>
+        <button type="button" class="tab-btn" data-tab="uniplus">UniPlus</button>
+        <button type="button" class="tab-btn" data-tab="opcoes">Opções</button>
+    </div>
 
-    <fieldset style="margin-bottom: 1.5rem;">
-        <legend style="margin-bottom: 0.5rem; font-weight: 600;">UniPlus Gourmet (Postgres local)</legend>
-        <p style="color:#666; font-size: 0.9rem;">Quando o Compuchat enviar <code>uniplus_job</code>, o agente grava a entrega em CONTAMESA/CONTAMESAITEM.</p>
-        <div class="form-group">
-            <label>
-                <input type="checkbox" name="uniplus_enabled" value="on" {% if uniplus_enabled %}checked{% endif %}>
-                Ativar UniPlus neste agente
-            </label>
-        </div>
-        <div class="form-group">
-            <label for="uniplus_connection_string">Connection string Postgres</label>
-            <input type="text" id="uniplus_connection_string" name="uniplus_connection_string"
-                   value="{{ uniplus_connection_string }}"
-                   placeholder="postgresql://user:pass@127.0.0.1:5432/unico">
-        </div>
-        <div class="form-row printer-grid-two">
+    <div class="tab-panel active" id="tab-conexao">
+        <div class="section-card">
+            <h3 style="margin-bottom: 0.65rem;">Conexão com o Compuchat</h3>
             <div class="form-group">
-                <label>Tabela produto</label>
-                <input type="text" name="uniplus_produto_table" value="{{ uniplus_produto_table }}">
-            </div>
-            <div class="form-group">
-                <label>Coluna código produto</label>
-                <input type="text" name="uniplus_produto_codigo_column" value="{{ uniplus_produto_codigo_column }}">
-            </div>
-            <div class="form-group">
-                <label>Coluna id produto</label>
-                <input type="text" name="uniplus_produto_id_column" value="{{ uniplus_produto_id_column }}">
-            </div>
-            <div class="form-group">
-                <label>Tabela contamesa</label>
-                <input type="text" name="uniplus_contamesa_table" value="{{ uniplus_contamesa_table }}">
-            </div>
-            <div class="form-group">
-                <label>Tabela contamesaitem</label>
-                <input type="text" name="uniplus_contamesaitem_table" value="{{ uniplus_contamesaitem_table }}">
+                <label for="ws_url">URL WebSocket</label>
+                <input type="url" id="ws_url" name="ws_url" value="{{ ws_url }}" placeholder="ws://localhost:4000/ws/print">
+                <p class="hint">Local: <code>ws://localhost:4000/ws/print</code> · Rede: <code>ws://IP_DO_SERVIDOR:4000/ws/print</code></p>
             </div>
         </div>
-    </fieldset>
+    </div>
 
-    <fieldset>
-        <legend style="margin-bottom: 0.5rem; font-weight: 600;">Impressoras</legend>
-        <p style="color:#666; font-size: 0.9rem;">Cada impressora corresponde a um dispositivo (Device ID + Token) no SaaS e a uma impressora física (IP/porta). As impressoras são cadastradas no sistema (banco de dados); aqui você associa cada uma ao IP da impressora local.</p>
+    <div class="tab-panel" id="tab-impressoras">
+        <p class="hint" style="margin-bottom: 0.85rem;">
+            Cada impressora usa um Device ID + Token do Compuchat e aponta para uma impressora física (rede ou Windows local).
+        </p>
         <div id="printers-container" class="printers-grid">
             {% for p in printers %}
             <div class="printer-block printer-card" data-index="{{ loop.index0 }}">
@@ -82,7 +80,7 @@
                     <h3 class="printer-card-title">Impressora {{ loop.index }}</h3>
                     <span class="printer-card-badge">Dispositivo</span>
                 </div>
-                <div class="form-row printer-grid-two">
+                <div class="grid-2">
                     <div class="form-group">
                         <label>Device ID</label>
                         <input type="text" name="printer_{{ loop.index0 }}_device_id" value="{{ p.device_id }}" placeholder="ex: cozinha-01">
@@ -104,7 +102,7 @@
                     </select>
                 </div>
                 <div class="network-config" id="network-config-{{ loop.index0 }}" style="{% if p.get('connection_type') == 'local' %}display: none;{% endif %}">
-                    <div class="form-row printer-grid-two">
+                    <div class="grid-2">
                         <div class="form-group">
                             <label>IP da impressora</label>
                             <input type="text" name="printer_{{ loop.index0 }}_printer_ip" value="{{ p.printer_ip }}">
@@ -121,7 +119,7 @@
                         <select name="printer_{{ loop.index0 }}_printer_name_local" id="printer-name-local-{{ loop.index0 }}" data-saved-value="{{ p.get('printer_name_local', '') }}">
                             <option value="">Carregando impressoras...</option>
                         </select>
-                        <button type="button" class="btn-refresh-printers" data-index="{{ loop.index0 }}" style="margin-top: 0.5rem;">Atualizar lista</button>
+                        <button type="button" class="btn-refresh-printers btn-ghost" data-index="{{ loop.index0 }}" style="margin-top: 0.5rem;">Atualizar lista</button>
                     </div>
                 </div>
                 <div class="network-only-config" id="network-only-config-{{ loop.index0 }}" style="{% if p.get('connection_type') == 'local' %}display: none;{% endif %}">
@@ -133,41 +131,86 @@
                         </select>
                     </div>
                 </div>
-                <div class="form-group">
-                    <label>Largura do papel (caracteres)</label>
-                    <input type="number" name="printer_{{ loop.index0 }}_paper_width" value="{{ p.paper_width }}" min="24" max="48">
+                <div class="grid-2">
+                    <div class="form-group">
+                        <label>Largura do papel (caracteres)</label>
+                        <input type="number" name="printer_{{ loop.index0 }}_paper_width" value="{{ p.paper_width }}" min="24" max="48">
+                    </div>
+                    <div class="form-group">
+                        <label>Codificação</label>
+                        <select name="printer_{{ loop.index0 }}_printer_encoding">
+                            <option value="cp850" {% if p.printer_encoding == 'cp850' %}selected{% endif %}>CP850</option>
+                            <option value="cp860" {% if p.printer_encoding == 'cp860' %}selected{% endif %}>CP860</option>
+                            <option value="cp1252" {% if p.printer_encoding == 'cp1252' %}selected{% endif %}>CP1252</option>
+                            <option value="utf8" {% if p.printer_encoding == 'utf8' %}selected{% endif %}>UTF-8</option>
+                        </select>
+                    </div>
                 </div>
-        <div class="form-group">
-            <label>Codificação</label>
-            <select name="printer_{{ loop.index0 }}_printer_encoding">
-                <option value="cp850" {% if p.printer_encoding == 'cp850' %}selected{% endif %}>CP850</option>
-                <option value="cp860" {% if p.printer_encoding == 'cp860' %}selected{% endif %}>CP860</option>
-                <option value="cp1252" {% if p.printer_encoding == 'cp1252' %}selected{% endif %}>CP1252</option>
-                <option value="utf8" {% if p.printer_encoding == 'utf8' %}selected{% endif %}>UTF-8</option>
-            </select>
-        </div>
-        <div class="printer-actions">
-            <button type="button" class="btn-test-printer btn-secondary" data-index="{{ loop.index0 }}">Testar Impressora</button>
-            <button type="button" class="btn-remove" aria-label="Remover impressora">Remover</button>
-        </div>
+                <div class="printer-actions">
+                    <button type="button" class="btn-test-printer btn-secondary" data-index="{{ loop.index0 }}">Testar impressora</button>
+                    <button type="button" class="btn-remove btn-danger" aria-label="Remover impressora">Remover</button>
+                </div>
             </div>
             {% endfor %}
         </div>
-        <div style="margin-top: 1rem;">
-            <button type="button" id="add-printer">Adicionar impressora</button>
+        <div style="margin-top: 0.9rem;">
+            <button type="button" id="add-printer" class="btn-ghost">+ Adicionar impressora</button>
         </div>
-    </fieldset>
+    </div>
 
-    <fieldset style="margin-top: 1.5rem;">
-        <legend style="margin-bottom: 0.5rem; font-weight: 600;">Comportamento</legend>
-        <div class="form-group" style="display: flex; align-items: center; gap: 0.5rem;">
-            <input type="checkbox" id="restart_service_on_save" name="restart_service_on_save" value="1" {% if restart_service_on_save %}checked{% endif %}>
-            <label for="restart_service_on_save" style="margin: 0;">Reiniciar serviço ao salvar</label>
+    <div class="tab-panel" id="tab-uniplus">
+        <div class="section-card">
+            <h3 style="margin-bottom: 0.4rem;">UniPlus Gourmet</h3>
+            <p class="hint" style="margin-bottom: 0.85rem;">
+                Quando o Compuchat enviar <code>uniplus_job</code>, o agente grava a entrega em CONTAMESA/CONTAMESAITEM.
+            </p>
+            <div class="form-group check-row">
+                <input type="checkbox" id="uniplus_enabled" name="uniplus_enabled" value="on" {% if uniplus_enabled %}checked{% endif %}>
+                <label for="uniplus_enabled">Ativar UniPlus neste agente</label>
+            </div>
+            <div class="form-group">
+                <label for="uniplus_connection_string">Connection string Postgres</label>
+                <input type="text" id="uniplus_connection_string" name="uniplus_connection_string"
+                       value="{{ uniplus_connection_string }}"
+                       placeholder="postgresql://user:pass@127.0.0.1:5432/unico">
+            </div>
+            <div class="grid-2">
+                <div class="form-group">
+                    <label>Tabela produto</label>
+                    <input type="text" name="uniplus_produto_table" value="{{ uniplus_produto_table }}">
+                </div>
+                <div class="form-group">
+                    <label>Coluna código produto</label>
+                    <input type="text" name="uniplus_produto_codigo_column" value="{{ uniplus_produto_codigo_column }}">
+                </div>
+                <div class="form-group">
+                    <label>Coluna id produto</label>
+                    <input type="text" name="uniplus_produto_id_column" value="{{ uniplus_produto_id_column }}">
+                </div>
+                <div class="form-group">
+                    <label>Tabela contamesa</label>
+                    <input type="text" name="uniplus_contamesa_table" value="{{ uniplus_contamesa_table }}">
+                </div>
+                <div class="form-group">
+                    <label>Tabela contamesaitem</label>
+                    <input type="text" name="uniplus_contamesaitem_table" value="{{ uniplus_contamesaitem_table }}">
+                </div>
+            </div>
         </div>
-        <p style="color:#666; font-size: 0.85rem; margin-top: 0.25rem;">Quando marcado, ao salvar a configuração o agente (conexão WebSocket) é reiniciado para aplicar as alterações.</p>
-    </fieldset>
+    </div>
 
-    <div style="margin-top: 1.5rem;">
+    <div class="tab-panel" id="tab-opcoes">
+        <div class="section-card">
+            <h3 style="margin-bottom: 0.65rem;">Comportamento</h3>
+            <div class="form-group check-row">
+                <input type="checkbox" id="restart_service_on_save" name="restart_service_on_save" value="1" {% if restart_service_on_save %}checked{% endif %}>
+                <label for="restart_service_on_save">Reiniciar serviço ao salvar</label>
+            </div>
+            <p class="hint">Quando marcado, ao salvar a configuração o agente (WebSocket) reinicia para aplicar as alterações.</p>
+        </div>
+    </div>
+
+    <div class="sticky-actions">
         <button type="submit">Salvar configuração</button>
     </div>
 </form>
@@ -178,7 +221,7 @@
             <h3 class="printer-card-title">Impressora <span class="printer-num"></span></h3>
             <span class="printer-card-badge">Dispositivo</span>
         </div>
-        <div class="form-row printer-grid-two">
+        <div class="grid-2">
             <div class="form-group">
                 <label>Device ID</label>
                 <input type="text" name="printer_X_device_id" placeholder="ex: cozinha-01">
@@ -200,7 +243,7 @@
             </select>
         </div>
         <div class="network-config" id="network-config-X">
-            <div class="form-row printer-grid-two">
+            <div class="grid-2">
                 <div class="form-group">
                     <label>IP da impressora</label>
                     <input type="text" name="printer_X_printer_ip" value="192.168.1.100">
@@ -217,7 +260,7 @@
                 <select name="printer_X_printer_name_local" id="printer-name-local-X">
                     <option value="">Carregando impressoras...</option>
                 </select>
-                <button type="button" class="btn-refresh-printers" data-index="X" style="margin-top: 0.5rem;">Atualizar lista</button>
+                <button type="button" class="btn-refresh-printers btn-ghost" data-index="X" style="margin-top: 0.5rem;">Atualizar lista</button>
             </div>
         </div>
         <div class="network-only-config" id="network-only-config-X">
@@ -229,28 +272,54 @@
                 </select>
             </div>
         </div>
-        <div class="form-group">
-            <label>Largura do papel (caracteres)</label>
-            <input type="number" name="printer_X_paper_width" value="32" min="24" max="48">
-        </div>
-        <div class="form-group">
-            <label>Codificação</label>
-            <select name="printer_X_printer_encoding">
-                <option value="cp850" selected>CP850</option>
-                <option value="cp860">CP860</option>
-                <option value="cp1252">CP1252</option>
-                <option value="utf8">UTF-8</option>
-            </select>
+        <div class="grid-2">
+            <div class="form-group">
+                <label>Largura do papel (caracteres)</label>
+                <input type="number" name="printer_X_paper_width" value="32" min="24" max="48">
+            </div>
+            <div class="form-group">
+                <label>Codificação</label>
+                <select name="printer_X_printer_encoding">
+                    <option value="cp850" selected>CP850</option>
+                    <option value="cp860">CP860</option>
+                    <option value="cp1252">CP1252</option>
+                    <option value="utf8">UTF-8</option>
+                </select>
+            </div>
         </div>
         <div class="printer-actions">
-            <button type="button" class="btn-test-printer btn-secondary" data-index="X">Testar Impressora</button>
-            <button type="button" class="btn-remove" aria-label="Remover impressora">Remover</button>
+            <button type="button" class="btn-test-printer btn-secondary" data-index="X">Testar impressora</button>
+            <button type="button" class="btn-remove btn-danger" aria-label="Remover impressora">Remover</button>
         </div>
     </div>
 </template>
+{% endblock %}
 
+{% block extra_js %}
 <script>
 (function() {
+    // Tabs
+    var tabButtons = document.querySelectorAll('.tab-btn');
+    var tabPanels = document.querySelectorAll('.tab-panel');
+    function activateTab(name) {
+        tabButtons.forEach(function(btn) {
+            btn.classList.toggle('active', btn.getAttribute('data-tab') === name);
+        });
+        tabPanels.forEach(function(panel) {
+            panel.classList.toggle('active', panel.id === 'tab-' + name);
+        });
+        try { history.replaceState(null, '', '#' + name); } catch (e) {}
+    }
+    tabButtons.forEach(function(btn) {
+        btn.addEventListener('click', function() {
+            activateTab(btn.getAttribute('data-tab'));
+        });
+    });
+    var hash = (location.hash || '').replace('#', '');
+    if (hash && document.getElementById('tab-' + hash)) {
+        activateTab(hash);
+    }
+
     var container = document.getElementById('printers-container');
     var tpl = document.getElementById('printer-block-tpl');
     var addBtn = document.getElementById('add-printer');
@@ -269,6 +338,8 @@
         block.setAttribute('data-index', idx);
         var numEl = block.querySelector('.printer-num');
         if (numEl) numEl.textContent = idx + 1;
+        var title = block.querySelector('.printer-card-title');
+        if (title && !numEl) title.textContent = 'Impressora ' + (idx + 1);
         block.querySelectorAll('[name]').forEach(function(input) {
             var n = input.getAttribute('name');
             if (n && n.indexOf('printer_') === 0) {
@@ -276,26 +347,14 @@
                 input.setAttribute('name', 'printer_' + idx + '_' + rest);
             }
         });
-        // Atualizar IDs dos elementos dinâmicos
         block.querySelectorAll('[id]').forEach(function(el) {
             var id = el.getAttribute('id');
             if (!id) return;
-            
-            // Atualizar IDs específicos - substituir X ou número pelo índice atual
-            if (id.indexOf('network-config-') >= 0) {
-                el.setAttribute('id', 'network-config-' + idx);
-            } else if (id.indexOf('local-config-') >= 0) {
-                el.setAttribute('id', 'local-config-' + idx);
-            } else if (id.indexOf('network-only-config-') >= 0) {
-                el.setAttribute('id', 'network-only-config-' + idx);
-            } else if (id.indexOf('printer-name-local-') >= 0) {
-                el.setAttribute('id', 'printer-name-local-' + idx);
-            } else if (id.indexOf('printer-') === 0) {
-                var newId = id.replace(/printer-.*?-(X|\d+)/, 'printer-$1-' + idx);
-                el.setAttribute('id', newId);
-            }
+            if (id.indexOf('network-config-') >= 0) el.setAttribute('id', 'network-config-' + idx);
+            else if (id.indexOf('local-config-') >= 0) el.setAttribute('id', 'local-config-' + idx);
+            else if (id.indexOf('network-only-config-') >= 0) el.setAttribute('id', 'network-only-config-' + idx);
+            else if (id.indexOf('printer-name-local-') >= 0) el.setAttribute('id', 'printer-name-local-' + idx);
         });
-        // Atualizar data-index dos botões
         block.querySelectorAll('[data-index]').forEach(function(el) {
             if (el.classList.contains('connection-type-select') || el.classList.contains('btn-refresh-printers') || el.classList.contains('btn-test-printer')) {
                 el.setAttribute('data-index', idx);
@@ -308,11 +367,12 @@
         var clone = tpl.content.cloneNode(true);
         var block = clone.querySelector('.printer-block');
         setBlockIndex(block, idx);
-        block.querySelector('.printer-num').textContent = idx + 1;
+        if (block.querySelector('.printer-num')) block.querySelector('.printer-num').textContent = idx + 1;
         container.appendChild(clone);
         bindRemove(block);
         bindConnectionType(block);
         bindTestPrinter(block);
+        activateTab('impressoras');
     });
 
     function bindRemove(block) {
@@ -325,67 +385,44 @@
     function bindTestPrinter(block) {
         var btn = block.querySelector('.btn-test-printer');
         if (!btn) return;
-        
         btn.addEventListener('click', function() {
             var index = btn.getAttribute('data-index');
             var prefix = 'printer_' + index + '_';
-            
-            // Coletar dados do formulário
             var connectionType = block.querySelector('[name="' + prefix + 'connection_type"]').value;
             var testData = {
                 connection_type: connectionType,
                 paper_width: block.querySelector('[name="' + prefix + 'paper_width"]').value || '32',
                 printer_encoding: block.querySelector('[name="' + prefix + 'printer_encoding"]').value || 'cp850',
             };
-            
             if (connectionType === 'local') {
                 var printerNameLocal = block.querySelector('[name="' + prefix + 'printer_name_local"]').value;
-                if (!printerNameLocal) {
-                    alert('Selecione uma impressora local primeiro');
-                    return;
-                }
+                if (!printerNameLocal) { alert('Selecione uma impressora local primeiro'); return; }
                 testData.printer_name_local = printerNameLocal;
             } else {
                 var printerIp = block.querySelector('[name="' + prefix + 'printer_ip"]').value;
                 var printerPort = block.querySelector('[name="' + prefix + 'printer_port"]').value || '9100';
                 var printerType = block.querySelector('[name="' + prefix + 'printer_type"]').value || 'raw';
-                
-                if (!printerIp) {
-                    alert('Informe o IP da impressora primeiro');
-                    return;
-                }
+                if (!printerIp) { alert('Informe o IP da impressora primeiro'); return; }
                 testData.printer_ip = printerIp;
                 testData.printer_port = parseInt(printerPort);
                 testData.printer_type = printerType;
             }
-            
-            // Desabilitar botão durante o teste
             btn.disabled = true;
             btn.textContent = 'Testando...';
-            
             fetch('/api/test-printer', {
                 method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
+                headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(testData)
             })
-            .then(function(response) {
-                return response.json();
-            })
+            .then(function(r) { return r.json(); })
             .then(function(data) {
-                if (data.success) {
-                    alert('✓ ' + data.message);
-                } else {
-                    alert('✗ Erro: ' + (data.error || 'Falha ao testar impressora'));
-                }
+                if (data.success) alert('✓ ' + data.message);
+                else alert('✗ Erro: ' + (data.error || 'Falha ao testar impressora'));
             })
-            .catch(function(error) {
-                alert('✗ Erro ao conectar: ' + error.message);
-            })
+            .catch(function(error) { alert('✗ Erro ao conectar: ' + error.message); })
             .finally(function() {
                 btn.disabled = false;
-                btn.textContent = 'Testar Impressora';
+                btn.textContent = 'Testar impressora';
             });
         });
     }
@@ -393,42 +430,30 @@
     function renumberBlocks() {
         container.querySelectorAll('.printer-block').forEach(function(block, i) {
             setBlockIndex(block, i);
+            var title = block.querySelector('.printer-card-title');
+            if (title) title.innerHTML = 'Impressora ' + (i + 1);
         });
     }
 
-    container.querySelectorAll('.printer-block').forEach(function(block) {
-        bindRemove(block);
-        bindTestPrinter(block);
-    });
-    
-    // Função para carregar impressoras locais
     function loadLocalPrinters(selectId, index) {
         var select = document.getElementById(selectId);
         if (!select) return;
-        
         var savedValue = select.getAttribute('data-saved-value') || '';
         select.innerHTML = '<option value="">Carregando...</option>';
-        
         fetch('/api/local-printers')
-            .then(function(response) {
-                return response.json();
-            })
+            .then(function(r) { return r.json(); })
             .then(function(data) {
                 if (data.error) {
                     select.innerHTML = '<option value="">' + data.error + '</option>';
-                    console.error('Erro ao carregar impressoras:', data.error);
                     return;
                 }
-                
                 select.innerHTML = '<option value="">Selecione uma impressora</option>';
                 if (data.printers && data.printers.length > 0) {
                     data.printers.forEach(function(printer) {
                         var option = document.createElement('option');
                         option.value = printer.name;
                         option.textContent = printer.name;
-                        if (printer.name === savedValue) {
-                            option.selected = true;
-                        }
+                        if (printer.name === savedValue) option.selected = true;
                         select.appendChild(option);
                     });
                 } else {
@@ -437,53 +462,36 @@
             })
             .catch(function(error) {
                 select.innerHTML = '<option value="">Erro ao conectar: ' + error.message + '</option>';
-                console.error('Erro ao carregar impressoras:', error);
             });
     }
-    
-    // Função para alternar entre rede e local
+
     function toggleConnectionType(select, index) {
         var connectionType = select.value;
         var networkConfig = document.getElementById('network-config-' + index);
         var localConfig = document.getElementById('local-config-' + index);
         var networkOnlyConfig = document.getElementById('network-only-config-' + index);
         var printerNameLocal = document.getElementById('printer-name-local-' + index);
-        
         if (connectionType === 'local') {
-            // Ocultar campos de rede
             if (networkConfig) networkConfig.style.display = 'none';
             if (networkOnlyConfig) networkOnlyConfig.style.display = 'none';
-            // Mostrar campo de impressora local
             if (localConfig) localConfig.style.display = 'block';
-            // Carregar lista de impressoras se necessário
             if (printerNameLocal && (printerNameLocal.options.length <= 1 || printerNameLocal.innerHTML.indexOf('Carregando') >= 0)) {
                 loadLocalPrinters('printer-name-local-' + index, index);
             }
         } else {
-            // Mostrar campos de rede
             if (networkConfig) networkConfig.style.display = 'block';
             if (networkOnlyConfig) networkOnlyConfig.style.display = 'block';
-            // Ocultar campo de impressora local
             if (localConfig) localConfig.style.display = 'none';
         }
     }
-    
-    // Bind eventos de mudança de tipo de conexão
+
     function bindConnectionType(block) {
         var select = block.querySelector('.connection-type-select');
         if (select) {
             var index = block.getAttribute('data-index');
-            
-            // Adicionar event listener para mudança
-            select.addEventListener('change', function() {
-                toggleConnectionType(this, index);
-            });
-            
-            // Aplicar estado inicial imediatamente
+            select.addEventListener('change', function() { toggleConnectionType(this, index); });
             toggleConnectionType(select, index);
         }
-        
-        // Bind botão de atualizar lista de impressoras
         var refreshBtn = block.querySelector('.btn-refresh-printers');
         if (refreshBtn) {
             refreshBtn.addEventListener('click', function() {
@@ -492,21 +500,12 @@
             });
         }
     }
-    
-    // Aplicar bind em todos os blocos existentes ao carregar a página
-    // Usar DOMContentLoaded ou setTimeout para garantir que o DOM está pronto
-    if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', function() {
-            container.querySelectorAll('.printer-block').forEach(function(block) {
-                bindConnectionType(block);
-            });
-        });
-    } else {
-        // DOM já está pronto
-        container.querySelectorAll('.printer-block').forEach(function(block) {
-            bindConnectionType(block);
-        });
-    }
+
+    container.querySelectorAll('.printer-block').forEach(function(block) {
+        bindRemove(block);
+        bindTestPrinter(block);
+        bindConnectionType(block);
+    });
 })();
 </script>
 {% endblock %}

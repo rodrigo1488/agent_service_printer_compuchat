@@ -1,31 +1,438 @@
 {% extends "base.html" %}
-{% block title %}Histórico - Print Agent{% endblock %}
+{% block title %}Logs - Print Agent{% endblock %}
+{% block extra_css %}
+<style>
+    .stats {
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 0.7rem;
+        margin-bottom: 1rem;
+    }
+    .stat {
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        padding: 0.85rem 0.95rem;
+        background: linear-gradient(180deg, #fbfcfd 0%, #f4f8fa 100%);
+    }
+    .stat .label { color: var(--muted); font-size: 0.78rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; }
+    .stat .value { font-size: 1.45rem; font-weight: 800; margin-top: 0.15rem; }
+    .filters {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.6rem;
+        align-items: end;
+        margin-bottom: 1rem;
+        padding: 0.85rem;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        background: #fafcfd;
+    }
+    .filters .form-group { margin: 0; min-width: 120px; flex: 1; }
+    .filters .form-group.grow { flex: 2; min-width: 180px; }
+    .filters .actions { display: flex; gap: 0.45rem; flex-wrap: wrap; }
+    .table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 12px; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+    th, td { padding: 0.7rem 0.85rem; text-align: left; border-bottom: 1px solid var(--line); vertical-align: top; }
+    th {
+        background: #f3f7f9;
+        color: var(--muted);
+        font-size: 0.75rem;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        font-weight: 700;
+        white-space: nowrap;
+    }
+    tr:last-child td { border-bottom: none; }
+    tr.log-row:hover td { background: #f8fbfc; }
+    tr.detail-row td {
+        background: #f4f8fa;
+        border-bottom: 1px solid var(--line);
+        padding-top: 0;
+        padding-bottom: 0.9rem;
+    }
+    .job-id { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.82rem; }
+    .msg { color: var(--ink); max-width: 520px; word-break: break-word; }
+    .msg.empty { color: var(--muted); }
+    .toolbar {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 0.75rem;
+        margin-bottom: 0.85rem;
+        flex-wrap: wrap;
+    }
+    .live-dot {
+        width: 8px; height: 8px; border-radius: 50%;
+        background: var(--ok);
+        display: inline-block;
+        box-shadow: 0 0 0 0 rgba(2, 122, 72, 0.45);
+        animation: pulse 1.8s infinite;
+    }
+    @keyframes pulse {
+        0% { box-shadow: 0 0 0 0 rgba(2, 122, 72, 0.35); }
+        70% { box-shadow: 0 0 0 8px rgba(2, 122, 72, 0); }
+        100% { box-shadow: 0 0 0 0 rgba(2, 122, 72, 0); }
+    }
+    .meta { color: var(--muted); font-size: 0.84rem; display: flex; align-items: center; gap: 0.45rem; }
+    .empty { text-align: center; padding: 2.5rem 1rem; color: var(--muted); }
+    .badge-kind-print { background: #eef2f5; color: var(--muted); }
+    .badge-kind-uniplus { background: #e0f2fe; color: #075985; }
+    .badge-action-created { background: var(--ok-soft); color: var(--ok); }
+    .badge-action-reuse { background: var(--warn-soft); color: var(--warn); }
+    .detail-card {
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        background: #fff;
+        padding: 0.85rem 1rem;
+        margin-top: 0.35rem;
+    }
+    .detail-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+        gap: 0.55rem 1rem;
+        margin-bottom: 0.75rem;
+    }
+    .detail-grid .k { color: var(--muted); font-size: 0.72rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.03em; }
+    .detail-grid .v { font-size: 0.9rem; font-weight: 600; word-break: break-word; }
+    .items-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+    .items-table th, .items-table td { padding: 0.4rem 0.5rem; border-bottom: 1px solid var(--line); }
+    .items-table th { background: #f8fafb; }
+    .toggle-detail {
+        background: transparent;
+        color: var(--accent);
+        border: none;
+        padding: 0;
+        font-size: 0.82rem;
+        font-weight: 700;
+        cursor: pointer;
+        margin-top: 0.25rem;
+    }
+    .toggle-detail:hover { text-decoration: underline; background: transparent; }
+    .hint-box {
+        margin-bottom: 1rem;
+        padding: 0.75rem 0.9rem;
+        border-radius: 10px;
+        background: #fff8eb;
+        border: 1px solid #f5d9a8;
+        color: #7a4b08;
+        font-size: 0.86rem;
+    }
+    @media (max-width: 760px) {
+        .stats { grid-template-columns: 1fr 1fr; }
+    }
+</style>
+{% endblock %}
 {% block content %}
-<h1>Histórico de Impressões</h1>
-{% if logs %}
-<table>
-    <thead>
-        <tr>
-            <th>ID</th>
-            <th>Job ID</th>
-            <th>Status</th>
-            <th>Mensagem</th>
-            <th>Data</th>
-        </tr>
-    </thead>
-    <tbody>
-        {% for log in logs %}
-        <tr>
-            <td>{{ log.id }}</td>
-            <td>{{ log.job_id }}</td>
-            <td>{{ log.status }}</td>
-            <td>{{ log.message or '-' }}</td>
-            <td>{{ log.created_at }}</td>
-        </tr>
-        {% endfor %}
-    </tbody>
-</table>
-{% else %}
-<p>Nenhum registro de impressão ainda.</p>
-{% endif %}
+<div class="toolbar">
+    <div>
+        <h2 class="page-title" style="margin-bottom: 0.15rem;">Logs</h2>
+        <p class="page-sub" style="margin-bottom: 0;">Impressões e inserts UniPlus (CONTAMESA / CONTAMESAITEM).</p>
+    </div>
+    <div class="meta">
+        <span class="live-dot" aria-hidden="true"></span>
+        <span id="auto-label">Atualização automática a cada 8s</span>
+        <button type="button" id="btn-refresh" class="btn-ghost">Atualizar agora</button>
+    </div>
+</div>
+
+<div class="hint-box">
+    Se aparecer <strong>REUSO (já existia)</strong>, o agente não inseriu de novo: o mesmo
+    <code>protocol</code>/<code>orderidintegracao</code> já existe no UniPlus.
+    Pedidos distintos precisam de protocolos diferentes no Compuchat.
+</div>
+
+<div class="stats" id="stats">
+    <div class="stat">
+        <div class="label">Total</div>
+        <div class="value" data-stat="total">{{ stats.total }}</div>
+    </div>
+    <div class="stat">
+        <div class="label">Sucesso</div>
+        <div class="value" data-stat="done">{{ stats.done }}</div>
+    </div>
+    <div class="stat">
+        <div class="label">Erro</div>
+        <div class="value" data-stat="error">{{ stats.error }}</div>
+    </div>
+    <div class="stat">
+        <div class="label">Outros</div>
+        <div class="value" data-stat="other">{{ stats.other }}</div>
+    </div>
+</div>
+
+<form class="filters" method="get" action="/logs" id="filters-form">
+    <div class="form-group">
+        <label for="kind">Tipo</label>
+        <select id="kind" name="kind">
+            <option value="all" {% if kind_filter == 'all' %}selected{% endif %}>Todos</option>
+            <option value="uniplus" {% if kind_filter == 'uniplus' %}selected{% endif %}>UniPlus</option>
+            <option value="print" {% if kind_filter == 'print' %}selected{% endif %}>Impressão</option>
+        </select>
+    </div>
+    <div class="form-group">
+        <label for="status">Status</label>
+        <select id="status" name="status">
+            <option value="all" {% if status_filter == 'all' %}selected{% endif %}>Todos</option>
+            <option value="done" {% if status_filter == 'done' %}selected{% endif %}>Sucesso</option>
+            <option value="error" {% if status_filter == 'error' %}selected{% endif %}>Erro</option>
+            <option value="pending" {% if status_filter == 'pending' %}selected{% endif %}>Pendente</option>
+        </select>
+    </div>
+    <div class="form-group grow">
+        <label for="q">Buscar</label>
+        <input type="text" id="q" name="q" value="{{ q }}" placeholder="Protocolo, cliente, conta, mensagem...">
+    </div>
+    <div class="form-group">
+        <label for="limit">Limite</label>
+        <select id="limit" name="limit">
+            {% for n in [25, 50, 100, 200] %}
+            <option value="{{ n }}" {% if limit == n %}selected{% endif %}>{{ n }}</option>
+            {% endfor %}
+        </select>
+    </div>
+    <div class="actions">
+        <button type="submit">Filtrar</button>
+        <a href="/logs" class="btn btn-ghost">Limpar</a>
+    </div>
+</form>
+
+<div class="table-wrap">
+    <table>
+        <thead>
+            <tr>
+                <th>Quando</th>
+                <th>Tipo</th>
+                <th>Status</th>
+                <th>Job</th>
+                <th>Resumo</th>
+            </tr>
+        </thead>
+        <tbody id="logs-body">
+            {% if logs %}
+                {% for log in logs %}
+                <tr class="log-row" data-id="{{ log.id }}">
+                    <td style="white-space: nowrap;">{{ log.created_at }}</td>
+                    <td>
+                        {% if log.kind == 'uniplus' %}
+                        <span class="badge badge-kind-uniplus">uniplus</span>
+                        {% else %}
+                        <span class="badge badge-kind-print">print</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% set st = (log.status or '')|lower %}
+                        {% if st == 'done' %}
+                        <span class="badge badge-ok">done</span>
+                        {% elif st == 'error' %}
+                        <span class="badge badge-error">error</span>
+                        {% else %}
+                        <span class="badge badge-muted">{{ log.status or '-' }}</span>
+                        {% endif %}
+                        {% if log.detail and log.detail.action == 'created' %}
+                        <div style="margin-top:0.25rem;"><span class="badge badge-action-created">insert</span></div>
+                        {% elif log.detail and log.detail.action == 'already_exists' %}
+                        <div style="margin-top:0.25rem;"><span class="badge badge-action-reuse">reuso</span></div>
+                        {% endif %}
+                    </td>
+                    <td class="job-id">{{ log.job_id }}</td>
+                    <td class="msg {% if not log.message %}empty{% endif %}">
+                        {{ log.message or '—' }}
+                        {% if log.detail %}
+                        <div><button type="button" class="toggle-detail" data-target="detail-{{ log.id }}">Ver o que foi gravado</button></div>
+                        {% endif %}
+                    </td>
+                </tr>
+                {% if log.detail %}
+                <tr class="detail-row" id="detail-{{ log.id }}" style="display:none;">
+                    <td colspan="5">
+                        <div class="detail-card" data-detail="{{ log.detail | tojson | e }}"></div>
+                    </td>
+                </tr>
+                {% endif %}
+                {% endfor %}
+            {% else %}
+                <tr><td colspan="5" class="empty">Nenhum registro encontrado com os filtros atuais.</td></tr>
+            {% endif %}
+        </tbody>
+    </table>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+(function() {
+    function escapeHtml(s) {
+        return String(s == null ? '' : s)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;');
+    }
+
+    function money(v) {
+        var n = Number(v);
+        if (!isFinite(n)) return '—';
+        return 'R$ ' + n.toFixed(2).replace('.', ',');
+    }
+
+    function renderDetailHtml(detail) {
+        if (!detail || typeof detail !== 'object') return '<p class="hint">Sem detalhe.</p>';
+        if (detail.action === 'error' || detail.error) {
+            return '<p><strong>Erro:</strong> ' + escapeHtml(detail.error || '—') + '</p>' +
+                '<p class="hint">protocol=' + escapeHtml(detail.protocol || '—') +
+                ' · formResponseId=' + escapeHtml(detail.formResponseId || '—') + '</p>';
+        }
+        var actionLabel = detail.action === 'already_exists'
+            ? '<span class="badge badge-action-reuse">já existia — nenhum INSERT</span>'
+            : detail.action === 'created'
+                ? '<span class="badge badge-action-created">INSERT novo</span>'
+                : escapeHtml(detail.action || '—');
+        var html = '<div class="detail-grid">' +
+            '<div><div class="k">Ação</div><div class="v">' + actionLabel + '</div></div>' +
+            '<div><div class="k">Conta UniPlus</div><div class="v">#' + escapeHtml(detail.conta_id) + '</div></div>' +
+            '<div><div class="k">Nº mesa (card)</div><div class="v">' + escapeHtml(detail.numeromesa != null ? detail.numeromesa : '—') + '</div></div>' +
+            '<div><div class="k">Protocolo</div><div class="v">' + escapeHtml(detail.protocol || '—') + '</div></div>' +
+            '<div><div class="k">FormResponse</div><div class="v">' + escapeHtml(detail.formResponseId || '—') + '</div></div>' +
+            '<div><div class="k">Cliente</div><div class="v">' + escapeHtml(detail.cliente || '—') + '</div></div>' +
+            '<div><div class="k">Telefone</div><div class="v">' + escapeHtml(detail.telefone || '—') + '</div></div>' +
+            '<div><div class="k">Total</div><div class="v">' + money(detail.valortotal) + '</div></div>' +
+            '<div><div class="k">Entrega</div><div class="v">' + money(detail.valorentrega) + '</div></div>' +
+            '<div><div class="k">Endereço</div><div class="v">' + escapeHtml(detail.endereco || '—') + '</div></div>' +
+            '<div><div class="k">Tabelas</div><div class="v">' + escapeHtml((detail.table_contamesa || 'contamesa') + ' / ' + (detail.table_itens || 'contamesaitem')) + '</div></div>' +
+            '</div>';
+        var itens = detail.itens || [];
+        if (itens.length) {
+            if (detail.action === 'already_exists') {
+                html += '<p class="hint" style="margin-bottom:0.5rem;">Payload recebido (não reinserido — conta já existia):</p>';
+            } else {
+                html += '<p class="hint" style="margin-bottom:0.5rem;">Itens gravados em CONTAMESAITEM:</p>';
+            }
+            html += '<table class="items-table"><thead><tr>' +
+                '<th>Cód.</th><th>Produto</th><th>Qtd</th><th>Total</th><th>idproduto</th>' +
+                '</tr></thead><tbody>';
+            itens.forEach(function(it) {
+                html += '<tr>' +
+                    '<td>' + escapeHtml(it.codigo) + '</td>' +
+                    '<td>' + escapeHtml(it.nome) + '</td>' +
+                    '<td>' + escapeHtml(it.qtd) + '</td>' +
+                    '<td>' + money(it.total) + '</td>' +
+                    '<td>' + escapeHtml(it.idproduto != null ? it.idproduto : '—') + '</td>' +
+                    '</tr>';
+            });
+            html += '</tbody></table>';
+        } else if (detail.action === 'already_exists') {
+            html += '<p class="hint">Reuso: conta #' + escapeHtml(detail.conta_id) + ' já existia. Nenhum INSERT.</p>';
+        }
+        return html;
+    }
+
+    function hydrateDetailCards(root) {
+        (root || document).querySelectorAll('.detail-card[data-detail]').forEach(function(card) {
+            if (card.getAttribute('data-hydrated') === '1') return;
+            try {
+                var detail = JSON.parse(card.getAttribute('data-detail'));
+                card.innerHTML = renderDetailHtml(detail);
+                card.setAttribute('data-hydrated', '1');
+            } catch (e) {
+                card.innerHTML = '<p class="hint">Falha ao ler detalhe.</p>';
+            }
+        });
+    }
+
+    function bindToggles(root) {
+        (root || document).querySelectorAll('.toggle-detail').forEach(function(btn) {
+            if (btn.getAttribute('data-bound') === '1') return;
+            btn.setAttribute('data-bound', '1');
+            btn.addEventListener('click', function() {
+                var id = btn.getAttribute('data-target');
+                var row = document.getElementById(id);
+                if (!row) return;
+                var open = row.style.display !== 'none';
+                row.style.display = open ? 'none' : 'table-row';
+                btn.textContent = open ? 'Ver o que foi gravado' : 'Ocultar detalhe';
+            });
+        });
+    }
+
+    function badgeStatus(status) {
+        var st = (status || '').toLowerCase();
+        var cls = 'badge-muted';
+        if (st === 'done') cls = 'badge-ok';
+        else if (st === 'error') cls = 'badge-error';
+        return '<span class="badge ' + cls + '">' + escapeHtml(status || '-') + '</span>';
+    }
+
+    function renderRows(logs) {
+        var body = document.getElementById('logs-body');
+        if (!logs || !logs.length) {
+            body.innerHTML = '<tr><td colspan="5" class="empty">Nenhum registro encontrado com os filtros atuais.</td></tr>';
+            return;
+        }
+        body.innerHTML = logs.map(function(log) {
+            var kind = (log.kind || 'print').toLowerCase();
+            var kindBadge = kind === 'uniplus'
+                ? '<span class="badge badge-kind-uniplus">uniplus</span>'
+                : '<span class="badge badge-kind-print">print</span>';
+            var actionBadge = '';
+            if (log.detail && log.detail.action === 'created') {
+                actionBadge = '<div style="margin-top:0.25rem;"><span class="badge badge-action-created">insert</span></div>';
+            } else if (log.detail && log.detail.action === 'already_exists') {
+                actionBadge = '<div style="margin-top:0.25rem;"><span class="badge badge-action-reuse">reuso</span></div>';
+            }
+            var msg = log.message ? escapeHtml(log.message) : '—';
+            var emptyCls = log.message ? '' : ' empty';
+            var toggle = '';
+            var detailRow = '';
+            if (log.detail) {
+                var detailJson = escapeHtml(JSON.stringify(log.detail));
+                toggle = '<div><button type="button" class="toggle-detail" data-target="detail-' + log.id + '">Ver o que foi gravado</button></div>';
+                detailRow = '<tr class="detail-row" id="detail-' + log.id + '" style="display:none;">' +
+                    '<td colspan="5"><div class="detail-card" data-detail="' + detailJson + '"></div></td></tr>';
+            }
+            return '<tr class="log-row" data-id="' + log.id + '">' +
+                '<td style="white-space: nowrap;">' + escapeHtml(log.created_at) + '</td>' +
+                '<td>' + kindBadge + '</td>' +
+                '<td>' + badgeStatus(log.status) + actionBadge + '</td>' +
+                '<td class="job-id">' + escapeHtml(log.job_id) + '</td>' +
+                '<td class="msg' + emptyCls + '">' + msg + toggle + '</td>' +
+                '</tr>' + detailRow;
+        }).join('');
+        hydrateDetailCards(body);
+        bindToggles(body);
+    }
+
+    function updateStats(stats) {
+        if (!stats) return;
+        ['total', 'done', 'error', 'other'].forEach(function(k) {
+            var el = document.querySelector('[data-stat="' + k + '"]');
+            if (el) el.textContent = stats[k] != null ? stats[k] : '0';
+        });
+    }
+
+    function currentQuery() {
+        var params = new URLSearchParams();
+        params.set('kind', document.getElementById('kind').value || 'all');
+        params.set('status', document.getElementById('status').value || 'all');
+        var q = document.getElementById('q').value || '';
+        if (q) params.set('q', q);
+        params.set('limit', document.getElementById('limit').value || '50');
+        return params.toString();
+    }
+
+    function refresh() {
+        fetch('/api/logs?' + currentQuery())
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                renderRows(data.logs || []);
+                updateStats(data.stats || {});
+            })
+            .catch(function() {});
+    }
+
+    hydrateDetailCards(document);
+    bindToggles(document);
+    document.getElementById('btn-refresh').addEventListener('click', refresh);
+    setInterval(refresh, 8000);
+})();
+</script>
 {% endblock %}

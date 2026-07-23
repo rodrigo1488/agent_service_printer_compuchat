@@ -259,6 +259,58 @@ class DataValidator:
             return False, "conteudo deve ser um dicionário"
         
         return True, None
+
+    @staticmethod
+    def validate_uniplus_job(data: dict) -> tuple[bool, Optional[str]]:
+        """Valida payload do evento uniplus_job."""
+        if not isinstance(data, dict):
+            return False, "ERR_UNIPLUS_PAYLOAD: dados inválidos"
+
+        job_id = data.get("job_id")
+        if job_id is None:
+            return False, "ERR_UNIPLUS_PAYLOAD: job_id ausente"
+        if not isinstance(job_id, int) and not (isinstance(job_id, str) and str(job_id).isdigit()):
+            return False, "ERR_UNIPLUS_PAYLOAD: job_id deve ser número"
+
+        conteudo = data.get("conteudo")
+        if not isinstance(conteudo, dict) or not conteudo:
+            return False, "ERR_UNIPLUS_PAYLOAD: conteudo ausente"
+
+        protocol = (
+            conteudo.get("protocol")
+            or (conteudo.get("contamesa") or {}).get("orderidintegracao")
+        )
+        if not protocol:
+            return False, "ERR_UNIPLUS_PAYLOAD: protocol ausente"
+
+        contamesa = conteudo.get("contamesa")
+        if not isinstance(contamesa, dict) or not contamesa:
+            return False, "ERR_UNIPLUS_PAYLOAD: contamesa ausente"
+
+        itens = conteudo.get("itens")
+        if not isinstance(itens, list) or not itens:
+            return False, "ERR_UNIPLUS_PAYLOAD: itens ausentes"
+
+        for idx, item in enumerate(itens):
+            if not isinstance(item, dict):
+                return False, f"ERR_UNIPLUS_PAYLOAD: item[{idx}] inválido"
+            codigo = str(item.get("codigoproduto") or "").strip()
+            if not codigo:
+                return False, f"ERR_UNIPLUS_PAYLOAD: item[{idx}] sem codigoproduto"
+            try:
+                qty = float(item.get("quantidade") or 1)
+                total = float(item.get("valortotal") or 0)
+            except (TypeError, ValueError):
+                return False, f"ERR_UNIPLUS_PAYLOAD: item[{idx}] valores numéricos inválidos"
+            if qty < 0 or total < 0:
+                return False, f"ERR_UNIPLUS_PAYLOAD: item[{idx}] quantidade/total negativo"
+
+        try:
+            float(contamesa.get("valortotal") or 0)
+        except (TypeError, ValueError):
+            return False, "ERR_UNIPLUS_PAYLOAD: valortotal inválido"
+
+        return True, None
     
     @staticmethod
     def sanitize_printer_config(config: dict) -> dict:

@@ -50,6 +50,7 @@ def _config_context():
     uniplus_contamesa_table = db.get_config("uniplus_contamesa_table") or "contamesa"
     uniplus_contamesaitem_table = db.get_config("uniplus_contamesaitem_table") or "contamesaitem"
     return {
+        "active_nav": "config",
         "ws_url": ws_url,
         "printers": printers,
         "restart_service_on_save": restart_on_save,
@@ -61,6 +62,89 @@ def _config_context():
         "uniplus_contamesa_table": uniplus_contamesa_table,
         "uniplus_contamesaitem_table": uniplus_contamesaitem_table,
     }
+
+
+def _build_health_status():
+    """Monta o payload de saúde usado por /health e /status."""
+    from error_recovery import ConnectionHealthChecker, thread_monitor
+    from agent import _agent_threads
+
+    health_status = {
+        "status": "ok",
+        "message": "Print Agent is running",
+        "timestamp": datetime.now().isoformat(),
+        "database": {
+            "status": "ok" if DatabaseRecovery.validate_db_connection(db.DB_FILE) else "error"
+        },
+        "threads": {
+            "total": len(_agent_threads),
+            "alive": sum(1 for t in _agent_threads if t.is_alive()),
+            "monitored": len(thread_monitor.monitored_threads) if hasattr(thread_monitor, "monitored_threads") else 0,
+        },
+        "printers": {
+            "configured": len(db.get_printers()),
+            "active": sum(1 for p in db.get_printers() if p.get("device_id") and p.get("token")),
+        },
+    }
+
+    printers = db.get_printers()
+    printer_health = []
+    for p in printers:
+        if p.get("connection_type") == "network":
+            printer_ip = p.get("printer_ip", "")
+            printer_port = p.get("printer_port", 9100)
+            is_accessible = (
+                ConnectionHealthChecker.check_printer_connection(printer_ip, printer_port)
+                if printer_ip
+                else False
+            )
+            printer_health.append(
+                {
+                    "device_id": p.get("device_id", ""),
+                    "connection_type": "network",
+                    "printer_ip": printer_ip,
+                    "printer_port": printer_port,
+                    "accessible": is_accessible,
+                }
+            )
+        else:
+            printer_health.append(
+                {
+                    "device_id": p.get("device_id", ""),
+                    "connection_type": "local",
+                    "accessible": True,
+                }
+            )
+
+    health_status["printers"]["health"] = printer_health
+
+    # UniPlus Postgres
+    from uniplus_handler import is_uniplus_enabled, validate_uniplus_connection
+
+    uniplus_on = is_uniplus_enabled(db)
+    uniplus_info = {
+        "enabled": uniplus_on,
+        "db_ok": None,
+        "last_error": db.get_config("uniplus_last_error") or "",
+    }
+    if uniplus_on:
+        ok_dsn, dsn_msg = validate_uniplus_connection(
+            db.get_config("uniplus_connection_string") or "",
+            contamesa_table=db.get_config("uniplus_contamesa_table") or "contamesa",
+            contamesaitem_table=db.get_config("uniplus_contamesaitem_table") or "contamesaitem",
+        )
+        uniplus_info["db_ok"] = ok_dsn
+        if not ok_dsn:
+            uniplus_info["last_error"] = dsn_msg
+            health_status["status"] = "degraded"
+    health_status["uniplus"] = uniplus_info
+
+    if health_status["database"]["status"] != "ok":
+        health_status["status"] = "degraded"
+    if health_status["threads"]["alive"] < health_status["threads"]["total"]:
+        health_status["status"] = "degraded"
+
+    return health_status
 
 
 @app.route("/")
@@ -77,38 +161,43 @@ def config():
     """GET: exibe form. POST: salva configuração (ws_url + lista de impressoras)."""
     if request.method == "POST":
         try:
+            from uniplus_handler import validate_uniplus_connection, _IDENT_RE
+
+            # UniPlus Gourmet (Postgres local) — validar antes de persistir
+            uniplus_enabled = request.form.get("uniplus_enabled", "").lower() in ("true", "1", "on", "yes")
+            uniplus_dsn = request.form.get("uniplus_connection_string", "").strip()
+            uniplus_tables = {
+                "uniplus_produto_table": request.form.get("uniplus_produto_table", "produto").strip() or "produto",
+                "uniplus_produto_codigo_column": request.form.get("uniplus_produto_codigo_column", "codigo").strip() or "codigo",
+                "uniplus_produto_id_column": request.form.get("uniplus_produto_id_column", "id").strip() or "id",
+                "uniplus_contamesa_table": request.form.get("uniplus_contamesa_table", "contamesa").strip() or "contamesa",
+                "uniplus_contamesaitem_table": request.form.get("uniplus_contamesaitem_table", "contamesaitem").strip()
+                or "contamesaitem",
+            }
+            for key, value in uniplus_tables.items():
+                if not _IDENT_RE.match(value):
+                    raise ValueError(f"Identificador UniPlus inválido em {key}: {value}")
+
+            if uniplus_enabled:
+                ok_dsn, dsn_msg = validate_uniplus_connection(
+                    uniplus_dsn,
+                    contamesa_table=uniplus_tables["uniplus_contamesa_table"],
+                    contamesaitem_table=uniplus_tables["uniplus_contamesaitem_table"],
+                )
+                if not ok_dsn:
+                    raise ValueError(f"UniPlus Postgres inválido: {dsn_msg}")
+                db.set_config("uniplus_last_error", "")
+            else:
+                db.set_config("uniplus_last_error", "")
+
             ws_url = request.form.get("ws_url", "").strip()
             if ws_url:
                 db.set_config("ws_url", ws_url)
 
-            # UniPlus Gourmet (Postgres local)
-            uniplus_enabled = request.form.get("uniplus_enabled", "").lower() in ("true", "1", "on", "yes")
             db.set_config("uniplus_enabled", "true" if uniplus_enabled else "false")
-            db.set_config(
-                "uniplus_connection_string",
-                request.form.get("uniplus_connection_string", "").strip(),
-            )
-            db.set_config(
-                "uniplus_produto_table",
-                request.form.get("uniplus_produto_table", "produto").strip() or "produto",
-            )
-            db.set_config(
-                "uniplus_produto_codigo_column",
-                request.form.get("uniplus_produto_codigo_column", "codigo").strip() or "codigo",
-            )
-            db.set_config(
-                "uniplus_produto_id_column",
-                request.form.get("uniplus_produto_id_column", "id").strip() or "id",
-            )
-            db.set_config(
-                "uniplus_contamesa_table",
-                request.form.get("uniplus_contamesa_table", "contamesa").strip() or "contamesa",
-            )
-            db.set_config(
-                "uniplus_contamesaitem_table",
-                request.form.get("uniplus_contamesaitem_table", "contamesaitem").strip()
-                or "contamesaitem",
-            )
+            db.set_config("uniplus_connection_string", uniplus_dsn)
+            for key, value in uniplus_tables.items():
+                db.set_config(key, value)
 
             # Montar lista de impressoras: printer_0_device_id, printer_0_token, ...
             indices = []
@@ -165,12 +254,24 @@ def config():
                 stop_agent()
                 start_agent_thread()
                 print("[INFO] Serviço reiniciado após salvar configuração.")
-            return redirect(url_for("index", message="Configuração salva com sucesso!" + (" Serviço reiniciado." if restart_on_save else ""), message_type="success"))
+            return redirect(
+                url_for(
+                    "index",
+                    message="Configuração salva com sucesso!"
+                    + (" Serviço reiniciado." if restart_on_save else ""),
+                    message_type="success",
+                )
+                + "#conexao"
+            )
         except Exception as e:
             import traceback
             error_msg = f"Erro: {str(e)}"
             print(f"[ERROR] Erro ao salvar configuração: {error_msg}")
             print(f"[ERROR] Traceback: {traceback.format_exc()}")
+            try:
+                db.set_config("uniplus_last_error", error_msg[:500])
+            except Exception:
+                pass
             ctx = _config_context()
             return render_template(
                 "config.html",
@@ -183,65 +284,72 @@ def config():
 
 @app.route("/health", methods=["GET"])
 def health():
-    """Health check para monitoramento."""
-    from error_recovery import ConnectionHealthChecker, thread_monitor
-    from agent import _agent_threads
-    
-    health_status = {
-        "status": "ok",
-        "message": "Print Agent is running",
-        "timestamp": datetime.now().isoformat(),
-        "database": {
-            "status": "ok" if DatabaseRecovery.validate_db_connection(db.DB_FILE) else "error"
-        },
-        "threads": {
-            "total": len(_agent_threads),
-            "alive": sum(1 for t in _agent_threads if t.is_alive()),
-            "monitored": len(thread_monitor.monitored_threads) if hasattr(thread_monitor, 'monitored_threads') else 0
-        },
-        "printers": {
-            "configured": len(db.get_printers()),
-            "active": sum(1 for p in db.get_printers() if p.get("device_id") and p.get("token"))
-        }
-    }
-    
-    # Verificar conectividade das impressoras configuradas
-    printers = db.get_printers()
-    printer_health = []
-    for p in printers:
-        if p.get("connection_type") == "network":
-            printer_ip = p.get("printer_ip", "")
-            printer_port = p.get("printer_port", 9100)
-            is_accessible = ConnectionHealthChecker.check_printer_connection(printer_ip, printer_port) if printer_ip else False
-            printer_health.append({
-                "device_id": p.get("device_id", ""),
-                "connection_type": "network",
-                "accessible": is_accessible
-            })
-        else:
-            printer_health.append({
-                "device_id": p.get("device_id", ""),
-                "connection_type": "local",
-                "accessible": True  # Assumir OK para locais (verificação mais complexa)
-            })
-    
-    health_status["printers"]["health"] = printer_health
-    
-    # Determinar status geral
-    if health_status["database"]["status"] != "ok":
-        health_status["status"] = "degraded"
-    if health_status["threads"]["alive"] < health_status["threads"]["total"]:
-        health_status["status"] = "degraded"
-    
+    """Health check JSON para monitoramento."""
+    health_status = _build_health_status()
     status_code = 200 if health_status["status"] == "ok" else 503
     return jsonify(health_status), status_code
 
 
+@app.route("/status")
+def status_page():
+    """Painel visual de saúde do agente."""
+    health_status = _build_health_status()
+    return render_template(
+        "status.html",
+        active_nav="status",
+        health=health_status,
+        ws_url=db.get_config("ws_url") or "",
+        uniplus_enabled=(db.get_config("uniplus_enabled") or "false").lower()
+        in ("true", "1", "yes", "on"),
+    )
+
+
 @app.route("/logs")
 def logs():
-    """Histórico de impressões."""
-    logs_list = db.get_print_logs(limit=50)
-    return render_template("logs.html", logs=logs_list)
+    """Histórico de impressões com filtros."""
+    status_filter = (request.args.get("status") or "all").strip().lower()
+    kind_filter = (request.args.get("kind") or "all").strip().lower()
+    q = (request.args.get("q") or "").strip()
+    try:
+        limit = int(request.args.get("limit") or 50)
+    except (TypeError, ValueError):
+        limit = 50
+    limit = max(1, min(limit, 500))
+    logs_list = db.get_print_logs(
+        limit=limit, status=status_filter, q=q, kind=kind_filter
+    )
+    stats = db.get_print_log_stats()
+    return render_template(
+        "logs.html",
+        active_nav="logs",
+        logs=logs_list,
+        stats=stats,
+        status_filter=status_filter,
+        kind_filter=kind_filter,
+        q=q,
+        limit=limit,
+    )
+
+
+@app.route("/api/logs")
+def api_logs():
+    """API JSON para auto-refresh da tela de logs."""
+    status_filter = (request.args.get("status") or "all").strip().lower()
+    kind_filter = (request.args.get("kind") or "all").strip().lower()
+    q = (request.args.get("q") or "").strip()
+    try:
+        limit = int(request.args.get("limit") or 50)
+    except (TypeError, ValueError):
+        limit = 50
+    limit = max(1, min(limit, 500))
+    return jsonify(
+        {
+            "logs": db.get_print_logs(
+                limit=limit, status=status_filter, q=q, kind=kind_filter
+            ),
+            "stats": db.get_print_log_stats(),
+        }
+    )
 
 
 @app.route("/api/test-printer", methods=["POST"])
@@ -383,6 +491,8 @@ if __name__ == "__main__":
         print("Print Agent - WebSocket")
         print("=" * 50)
         print("Interface: http://localhost:5000/")
+        print("Logs:      http://localhost:5000/logs")
+        print("Status:    http://localhost:5000/status")
         print("Health:    http://localhost:5000/health")
         print("=" * 50)
         start_agent_thread()

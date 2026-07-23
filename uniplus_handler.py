@@ -2,16 +2,30 @@
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Tuple
 
 logger = logging.getLogger("uniplus")
 
 try:
     import psycopg2
+    from psycopg2 import OperationalError, InterfaceError, IntegrityError
     from psycopg2.extras import RealDictCursor
 except ImportError:
     psycopg2 = None
+    OperationalError = Exception  # type: ignore
+    InterfaceError = Exception  # type: ignore
+    IntegrityError = Exception  # type: ignore
+    RealDictCursor = None  # type: ignore
+
+_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+CONNECT_TIMEOUT_SEC = 8
+STATEMENT_TIMEOUT_MS = 15000
+
+
+class UniplusPermanentError(RuntimeError):
+    """Erro que não deve ser retentado pelo SaaS."""
 
 
 def _pad_hash(value: str) -> str:
@@ -19,21 +33,88 @@ def _pad_hash(value: str) -> str:
     return (s + (" " * 40))[:40]
 
 
+def _safe_ident(name: str, default: str) -> str:
+    value = (name or default or "").strip()
+    if not _IDENT_RE.match(value):
+        raise UniplusPermanentError(
+            f"ERR_UNIPLUS_CONFIG: identificador SQL inválido '{name}'"
+        )
+    return value
+
+
 def _cfg(db_module) -> Dict[str, str]:
     return {
         "enabled": (db_module.get_config("uniplus_enabled") or "false").lower(),
         "connection_string": (db_module.get_config("uniplus_connection_string") or "").strip(),
-        "produto_table": (db_module.get_config("uniplus_produto_table") or "produto").strip(),
-        "produto_codigo_column": (db_module.get_config("uniplus_produto_codigo_column") or "codigo").strip(),
-        "produto_id_column": (db_module.get_config("uniplus_produto_id_column") or "id").strip(),
-        "contamesa_table": (db_module.get_config("uniplus_contamesa_table") or "contamesa").strip(),
-        "contamesaitem_table": (db_module.get_config("uniplus_contamesaitem_table") or "contamesaitem").strip(),
+        "produto_table": _safe_ident(
+            db_module.get_config("uniplus_produto_table") or "produto", "produto"
+        ),
+        "produto_codigo_column": _safe_ident(
+            db_module.get_config("uniplus_produto_codigo_column") or "codigo", "codigo"
+        ),
+        "produto_id_column": _safe_ident(
+            db_module.get_config("uniplus_produto_id_column") or "id", "id"
+        ),
+        "contamesa_table": _safe_ident(
+            db_module.get_config("uniplus_contamesa_table") or "contamesa", "contamesa"
+        ),
+        "contamesaitem_table": _safe_ident(
+            db_module.get_config("uniplus_contamesaitem_table") or "contamesaitem",
+            "contamesaitem",
+        ),
     }
 
 
 def is_uniplus_enabled(db_module) -> bool:
-    cfg = _cfg(db_module)
-    return cfg["enabled"] in ("true", "1", "yes", "on") and bool(cfg["connection_string"])
+    enabled = (db_module.get_config("uniplus_enabled") or "false").lower()
+    dsn = (db_module.get_config("uniplus_connection_string") or "").strip()
+    return enabled in ("true", "1", "yes", "on") and bool(dsn)
+
+
+def validate_uniplus_connection(
+    connection_string: str,
+    contamesa_table: str = "contamesa",
+    contamesaitem_table: str = "contamesaitem",
+) -> Tuple[bool, str]:
+    """Testa DSN + existência das tabelas. Usado no save/health do agente."""
+    if psycopg2 is None:
+        return False, "psycopg2 não instalado"
+    dsn = (connection_string or "").strip()
+    if not dsn:
+        return False, "connection string vazia"
+    try:
+        mesa = _safe_ident(contamesa_table, "contamesa")
+        item = _safe_ident(contamesaitem_table, "contamesaitem")
+    except UniplusPermanentError as e:
+        return False, str(e)
+    try:
+        conn = psycopg2.connect(dsn, connect_timeout=CONNECT_TIMEOUT_SEC)
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1")
+                cur.execute(
+                    """
+                    SELECT to_regclass(%s) AS mesa, to_regclass(%s) AS item
+                    """,
+                    (mesa, item),
+                )
+                row = cur.fetchone()
+                if not row or not row[0]:
+                    return False, f"tabela {mesa} não encontrada"
+                if not row[1]:
+                    return False, f"tabela {item} não encontrada"
+        finally:
+            conn.close()
+        return True, "ok"
+    except Exception as e:
+        return False, str(e)
+
+
+def _connect(dsn: str):
+    conn = psycopg2.connect(dsn, connect_timeout=CONNECT_TIMEOUT_SEC)
+    with conn.cursor() as cur:
+        cur.execute(f"SET statement_timeout = {int(STATEMENT_TIMEOUT_MS)}")
+    return conn
 
 
 def _resolve_produto_id(cur, cfg: Dict[str, str], codigo: str) -> int:
@@ -46,52 +127,186 @@ def _resolve_produto_id(cur, cfg: Dict[str, str], codigo: str) -> int:
     )
     row = cur.fetchone()
     if not row:
-        raise RuntimeError(f"Produto UniPlus não encontrado para codigo={codigo}")
+        raise UniplusPermanentError(
+            f"ERR_UNIPLUS_PRODUCT_NOT_FOUND: codigo={codigo}"
+        )
     return int(row["id"] if isinstance(row, dict) else row[0])
 
 
-def handle_uniplus_job(db_module, conteudo: Dict[str, Any]) -> Tuple[int, str]:
+def _summarize_payload(
+    protocol: str,
+    contamesa: Dict[str, Any],
+    itens: list,
+    form_response_id: Any = None,
+) -> Dict[str, Any]:
+    items_summary = []
+    for item in itens:
+        qty = float(item.get("quantidade") or 1)
+        codigo = str(item.get("codigoproduto") or "").strip()
+        nome = str(item.get("nomeproduto") or "").strip()
+        valortotal = float(item.get("valortotal") or 0)
+        items_summary.append(
+            {
+                "codigo": codigo,
+                "nome": nome,
+                "qtd": qty,
+                "total": valortotal,
+            }
+        )
+    return {
+        "protocol": str(protocol)[:40],
+        "formResponseId": form_response_id,
+        "cliente": str(contamesa.get("nomecliente") or "")[:60],
+        "telefone": str(contamesa.get("telefone") or "")[:20],
+        "endereco": " ".join(
+            p
+            for p in [
+                str(contamesa.get("endereco") or "").strip(),
+                str(contamesa.get("endereconumero") or "").strip(),
+                str(contamesa.get("enderecobairro") or "").strip(),
+            ]
+            if p
+        )[:120],
+        "valortotal": float(contamesa.get("valortotal") or 0),
+        "valorentrega": float(contamesa.get("valorentrega") or 0),
+        "itens_count": len(items_summary),
+        "itens": items_summary,
+    }
+
+
+def _next_numeromesa(cur, mesa_table: str) -> int:
+    cur.execute(
+        f"""
+        SELECT COALESCE(MAX(numeromesa), 0) + 1 AS next_num
+        FROM {mesa_table}
+        WHERE status = 1 AND tipopedido = 0
+        """
+    )
+    row = cur.fetchone()
+    next_num = int(row["next_num"] if isinstance(row, dict) else row[0])
+    return max(next_num, 1)
+
+
+def _existing_by_protocol(cur, mesa_table: str, protocol: str, summary: Dict[str, Any]) -> Dict[str, Any]:
+    cur.execute(
+        f"""
+        SELECT id, numeromesa, status
+        FROM {mesa_table}
+        WHERE orderidintegracao = %s
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (str(protocol)[:40],),
+    )
+    existing = cur.fetchone()
+    if not existing:
+        return None
+    conta_id = int(existing["id"])
+    status = int(existing["status"] if existing.get("status") is not None else -1)
+    numeromesa_existing = (
+        int(existing["numeromesa"])
+        if existing.get("numeromesa") is not None
+        else None
+    )
+    if status != 1:
+        raise UniplusPermanentError(
+            f"ERR_UNIPLUS_PROTOCOL_CLOSED: protocol={protocol} conta={conta_id} status={status}"
+        )
+    return {
+        **summary,
+        "conta_id": conta_id,
+        "numeromesa": numeromesa_existing,
+        "action": "already_exists",
+        "message": "already_exists",
+    }
+
+
+def format_uniplus_log_message(result: Dict[str, Any]) -> str:
+    action = result.get("action") or "?"
+    conta_id = result.get("conta_id")
+    protocol = result.get("protocol") or "?"
+    cliente = result.get("cliente") or "?"
+    total = result.get("valortotal")
+    n_itens = result.get("itens_count") or 0
+    mesa = result.get("numeromesa")
+    mesa_txt = f" mesa={mesa}" if mesa is not None else ""
+    if action == "already_exists":
+        return (
+            f"UniPlus REUSO (já existia) conta={conta_id}{mesa_txt} protocol={protocol} "
+            f"cliente={cliente} total={total} itens={n_itens}"
+        )
+    itens = result.get("itens") or []
+    itens_txt = ", ".join(
+        f"{it.get('qtd')}x {it.get('nome') or it.get('codigo')} (R$ {it.get('total')})"
+        for it in itens[:8]
+    )
+    if len(itens) > 8:
+        itens_txt += f" +{len(itens) - 8} itens"
+    return (
+        f"UniPlus INSERT conta={conta_id}{mesa_txt} protocol={protocol} "
+        f"cliente={cliente} total={total} · {itens_txt}"
+    )
+
+
+def handle_uniplus_job(db_module, conteudo: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Insere delivery aberto. Retorna (conta_id, message).
-    Idempotente por orderidintegracao (= protocol Compuchat).
+    Insere delivery aberto.
+    Idempotente por orderidintegracao (= protocol Compuchat), com advisory lock.
     """
     if psycopg2 is None:
-        raise RuntimeError("psycopg2 não instalado. Rode: pip install psycopg2-binary")
+        raise UniplusPermanentError(
+            "ERR_UNIPLUS_CONFIG: psycopg2 não instalado. Rode: pip install psycopg2-binary"
+        )
 
     cfg = _cfg(db_module)
     if cfg["enabled"] not in ("true", "1", "yes", "on"):
-        raise RuntimeError("UniPlus desabilitado na config do agente")
+        raise UniplusPermanentError("ERR_UNIPLUS_CONFIG: UniPlus desabilitado na config do agente")
     if not cfg["connection_string"]:
-        raise RuntimeError("uniplus_connection_string não configurada")
+        raise UniplusPermanentError("ERR_UNIPLUS_CONFIG: uniplus_connection_string não configurada")
 
     protocol = (
         conteudo.get("protocol")
         or (conteudo.get("contamesa") or {}).get("orderidintegracao")
     )
     if not protocol:
-        raise RuntimeError("Payload sem protocol/orderidintegracao")
+        raise UniplusPermanentError("ERR_UNIPLUS_PAYLOAD: sem protocol/orderidintegracao")
 
     contamesa = conteudo.get("contamesa") or {}
     itens = conteudo.get("itens") or []
     if not contamesa or not itens:
-        raise RuntimeError("Payload incompleto: contamesa/itens")
+        raise UniplusPermanentError("ERR_UNIPLUS_PAYLOAD: incompleto (contamesa/itens)")
 
+    summary = _summarize_payload(
+        str(protocol),
+        contamesa,
+        itens,
+        form_response_id=conteudo.get("formResponseId"),
+    )
+    summary["table_contamesa"] = cfg["contamesa_table"]
+    summary["table_itens"] = cfg["contamesaitem_table"]
     mesa_table = cfg["contamesa_table"]
     item_table = cfg["contamesaitem_table"]
     now = datetime.now(timezone.utc)
+    protocol_key = str(protocol)[:40]
 
-    conn = psycopg2.connect(cfg["connection_string"])
+    conn = _connect(cfg["connection_string"])
     try:
         with conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                cur.execute(
-                    f"SELECT id FROM {mesa_table} WHERE orderidintegracao = %s LIMIT 1",
-                    (str(protocol)[:40],),
-                )
-                existing = cur.fetchone()
-                if existing:
-                    return int(existing["id"]), "already_exists"
+                # Serializa inserts do mesmo protocol e alocação de numeromesa
+                cur.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (protocol_key,))
 
+                existing_result = _existing_by_protocol(cur, mesa_table, protocol_key, summary)
+                if existing_result:
+                    logger.info(
+                        "UniPlus already_exists conta=%s mesa=%s protocol=%s",
+                        existing_result.get("conta_id"),
+                        existing_result.get("numeromesa"),
+                        protocol_key,
+                    )
+                    return existing_result
+
+                numeromesa = _next_numeromesa(cur, mesa_table)
                 hash_val = _pad_hash(str(contamesa.get("hash") or ""))
                 insert_mesa = f"""
                     INSERT INTO {mesa_table} (
@@ -108,7 +323,8 @@ def handle_uniplus_job(db_module, conteudo: Dict[str, Any]) -> Tuple[int, str]:
                         retiradanobalcao, retirabalcaodepois, paraviagem,
                         numeropessoas, desconto, obs,
                         data, horaabertura, horaultimoconsumo,
-                        currenttimemillis, timestampalteracao
+                        currenttimemillis, timestampalteracao,
+                        statusagendamento, pautaunica
                     ) VALUES (
                         %s,%s,%s,%s,
                         %s,%s,%s,%s,
@@ -123,6 +339,7 @@ def handle_uniplus_job(db_module, conteudo: Dict[str, Any]) -> Tuple[int, str]:
                         %s,%s,%s,
                         %s,%s,%s,
                         %s,%s,%s,
+                        %s,%s,
                         %s,%s
                     ) RETURNING id
                 """
@@ -130,7 +347,7 @@ def handle_uniplus_job(db_module, conteudo: Dict[str, Any]) -> Tuple[int, str]:
                     int(contamesa.get("tipopedido") or 0),
                     int(contamesa.get("status") or 1),
                     int(contamesa.get("situacao") or 0),
-                    int(contamesa.get("numeromesa") or 1),
+                    numeromesa,
                     int(contamesa.get("idfilial") or 1),
                     int(contamesa.get("idusuario") or 1),
                     int(contamesa.get("idcliente") or 0),
@@ -154,7 +371,7 @@ def handle_uniplus_job(db_module, conteudo: Dict[str, Any]) -> Tuple[int, str]:
                     float(contamesa.get("valorcheque") or 0),
                     int(contamesa.get("tipointegracao") or 0),
                     str(contamesa.get("nomeintegracao") or "")[:64],
-                    str(protocol)[:40],
+                    protocol_key,
                     hash_val,
                     int(contamesa.get("statussinc") or 1),
                     int(contamesa.get("cupomcancelado") or 0),
@@ -169,18 +386,34 @@ def handle_uniplus_job(db_module, conteudo: Dict[str, Any]) -> Tuple[int, str]:
                     contamesa.get("horaultimoconsumo") or now.isoformat(),
                     int(contamesa.get("currenttimemillis") or int(now.timestamp() * 1000)),
                     int(contamesa.get("timestampalteracao") or int(now.timestamp() * 1000)),
+                    int(contamesa.get("statusagendamento") or 3),
+                    int(
+                        contamesa.get("pautaunica")
+                        if contamesa.get("pautaunica") is not None
+                        else 1
+                    ),
                 )
-                cur.execute(insert_mesa, mesa_values)
-                conta_id = int(cur.fetchone()["id"])
+                try:
+                    cur.execute(insert_mesa, mesa_values)
+                    conta_id = int(cur.fetchone()["id"])
+                except IntegrityError:
+                    reused = _existing_by_protocol(cur, mesa_table, protocol_key, summary)
+                    if reused:
+                        return reused
+                    raise
 
+                inserted_items = []
                 for item in itens:
                     codigo = str(item.get("codigoproduto") or "").strip()
                     if not codigo:
-                        raise RuntimeError("Item sem codigoproduto")
+                        raise UniplusPermanentError(
+                            "ERR_UNIPLUS_PAYLOAD: Item sem codigoproduto"
+                        )
                     idproduto = _resolve_produto_id(cur, cfg, codigo)
                     qty = float(item.get("quantidade") or 1)
                     precounitario = float(item.get("precounitario") or 0)
                     valortotal = float(item.get("valortotal") or (precounitario * qty))
+                    nome = str(item.get("nomeproduto") or "")[:120]
                     cur.execute(
                         f"""
                         INSERT INTO {item_table} (
@@ -205,17 +438,45 @@ def handle_uniplus_job(db_module, conteudo: Dict[str, Any]) -> Tuple[int, str]:
                             valortotal,
                             str(item.get("observacao") or "")[:255],
                             codigo[:20],
-                            str(item.get("nomeproduto") or "")[:120],
+                            nome,
                             str(item.get("unidademedida") or "UN")[:6],
-                            str(protocol)[:40],
+                            protocol_key,
                             contamesa.get("data") or now.date().isoformat(),
                             contamesa.get("horaabertura") or now.isoformat(),
                             now.isoformat(),
                             int(now.timestamp() * 1000),
-                            int(contamesa.get("numeromesa") or 1),
+                            numeromesa,
                         ),
                     )
+                    inserted_items.append(
+                        {
+                            "codigo": codigo[:20],
+                            "nome": nome,
+                            "idproduto": idproduto,
+                            "qtd": qty,
+                            "precounitario": precounitario,
+                            "total": valortotal,
+                        }
+                    )
 
-                return conta_id, "created"
+                result = {
+                    **summary,
+                    "conta_id": conta_id,
+                    "numeromesa": numeromesa,
+                    "action": "created",
+                    "message": "created",
+                    "itens": inserted_items,
+                    "itens_count": len(inserted_items),
+                }
+                logger.info(
+                    "UniPlus INSERT conta=%s mesa=%s protocol=%s cliente=%s itens=%s total=%s",
+                    conta_id,
+                    numeromesa,
+                    protocol_key,
+                    summary.get("cliente"),
+                    len(inserted_items),
+                    summary.get("valortotal"),
+                )
+                return result
     finally:
         conn.close()

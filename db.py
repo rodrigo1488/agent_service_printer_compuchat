@@ -29,6 +29,7 @@ DEFAULT_CONFIG = {
     "uniplus_produto_id_column": "id",
     "uniplus_contamesa_table": "contamesa",
     "uniplus_contamesaitem_table": "contamesaitem",
+    "uniplus_last_error": "",
 }
 PRINTER_KEYS = ("device_id", "token", "printer_ip", "printer_port", "printer_type", "paper_width", "printer_encoding", "name", "connection_type", "printer_name_local")
 
@@ -64,9 +65,20 @@ def init_db():
                 job_id INTEGER NOT NULL,
                 status TEXT NOT NULL,
                 message TEXT,
+                kind TEXT DEFAULT 'print',
+                detail TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        # Migração leve: colunas novas em bancos antigos
+        cols = {
+            row[1]
+            for row in conn.execute("PRAGMA table_info(print_logs)").fetchall()
+        }
+        if "kind" not in cols:
+            conn.execute("ALTER TABLE print_logs ADD COLUMN kind TEXT DEFAULT 'print'")
+        if "detail" not in cols:
+            conn.execute("ALTER TABLE print_logs ADD COLUMN detail TEXT")
         conn.commit()
 
         cursor = conn.execute("SELECT COUNT(*) FROM config")
@@ -147,8 +159,22 @@ def get_all_config() -> dict:
         conn.close()
 
 
-def add_print_log(job_id: int, status: str, message: str = None) -> None:
-    """Adiciona registro de impressão ao log."""
+def add_print_log(
+    job_id: int,
+    status: str,
+    message: str = None,
+    kind: str = "print",
+    detail: Any = None,
+) -> None:
+    """Adiciona registro de impressão/UniPlus ao log."""
+    kind_val = (kind or "print").strip().lower() or "print"
+    if isinstance(detail, (dict, list)):
+        detail_val = json.dumps(detail, ensure_ascii=False, default=str)
+    elif detail is None:
+        detail_val = None
+    else:
+        detail_val = str(detail)
+
     @retry_with_backoff(RetryConfig(
         max_retries=2,
         initial_delay=0.3,
@@ -159,8 +185,8 @@ def add_print_log(job_id: int, status: str, message: str = None) -> None:
         conn = _get_connection()
         try:
             conn.execute(
-                "INSERT INTO print_logs (job_id, status, message) VALUES (?, ?, ?)",
-                (job_id, status, message or ""),
+                "INSERT INTO print_logs (job_id, status, message, kind, detail) VALUES (?, ?, ?, ?, ?)",
+                (job_id, status, message or "", kind_val, detail_val),
             )
             conn.commit()
         finally:
@@ -250,24 +276,82 @@ def set_printers(printers: List[Dict[str, Any]]) -> None:
     print(f"[DEBUG] Configuração salva no banco de dados")
 
 
-def get_print_logs(limit: int = 50) -> list:
-    """Retorna últimos registros de impressão."""
+def get_print_logs(
+    limit: int = 50,
+    status: str = None,
+    q: str = None,
+    kind: str = None,
+) -> list:
+    """Retorna registros com filtro opcional de status, texto e tipo (print|uniplus)."""
+    conn = _get_connection()
+    try:
+        sql = (
+            "SELECT id, job_id, status, message, created_at, "
+            "ifnull(kind, 'print') AS kind, detail "
+            "FROM print_logs WHERE 1=1"
+        )
+        params = []
+        if status and str(status).strip() and str(status).strip().lower() != "all":
+            sql += " AND lower(status) = ?"
+            params.append(str(status).strip().lower())
+        if kind and str(kind).strip() and str(kind).strip().lower() != "all":
+            sql += " AND lower(ifnull(kind, 'print')) = ?"
+            params.append(str(kind).strip().lower())
+        if q and str(q).strip():
+            sql += (
+                " AND (CAST(job_id AS TEXT) LIKE ? OR ifnull(message,'') LIKE ?"
+                " OR ifnull(detail,'') LIKE ?)"
+            )
+            like = f"%{str(q).strip()}%"
+            params.extend([like, like, like])
+        sql += " ORDER BY created_at DESC, id DESC LIMIT ?"
+        params.append(max(1, min(int(limit or 50), 500)))
+        cursor = conn.execute(sql, params)
+        logs = []
+        for row in cursor.fetchall():
+            detail_raw = row[6]
+            detail_obj = None
+            if detail_raw:
+                try:
+                    detail_obj = json.loads(detail_raw)
+                except Exception:
+                    detail_obj = {"raw": detail_raw}
+            logs.append(
+                {
+                    "id": row[0],
+                    "job_id": row[1],
+                    "status": row[2],
+                    "message": row[3] or "",
+                    "created_at": row[4],
+                    "kind": row[5] or "print",
+                    "detail": detail_obj,
+                }
+            )
+        return logs
+    finally:
+        conn.close()
+
+
+def get_print_log_stats() -> dict:
+    """Contadores rápidos para o painel de logs."""
     conn = _get_connection()
     try:
         cursor = conn.execute(
-            "SELECT id, job_id, status, message, created_at FROM print_logs "
-            "ORDER BY created_at DESC LIMIT ?",
-            (limit,),
+            """
+            SELECT
+              COUNT(*) AS total,
+              SUM(CASE WHEN lower(status) = 'done' THEN 1 ELSE 0 END) AS done,
+              SUM(CASE WHEN lower(status) = 'error' THEN 1 ELSE 0 END) AS error,
+              SUM(CASE WHEN lower(status) NOT IN ('done','error') THEN 1 ELSE 0 END) AS other
+            FROM print_logs
+            """
         )
-        return [
-            {
-                "id": row[0],
-                "job_id": row[1],
-                "status": row[2],
-                "message": row[3] or "",
-                "created_at": row[4],
-            }
-            for row in cursor.fetchall()
-        ]
+        row = cursor.fetchone()
+        return {
+            "total": int(row[0] or 0),
+            "done": int(row[1] or 0),
+            "error": int(row[2] or 0),
+            "other": int(row[3] or 0),
+        }
     finally:
         conn.close()

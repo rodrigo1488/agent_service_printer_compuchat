@@ -1,0 +1,176 @@
+{% extends "base.html" %}
+{% block title %}Status - Print Agent{% endblock %}
+{% block extra_css %}
+<style>
+    .status-hero {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 1rem;
+        margin-bottom: 1.1rem;
+        flex-wrap: wrap;
+    }
+    .status-pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.45rem;
+        padding: 0.45rem 0.85rem;
+        border-radius: 999px;
+        font-weight: 800;
+        font-size: 0.9rem;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+    }
+    .status-ok { background: var(--ok-soft); color: var(--ok); }
+    .status-degraded { background: var(--warn-soft); color: var(--warn); }
+    .status-error { background: var(--danger-soft); color: var(--danger); }
+    .cards {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 0.75rem;
+        margin-bottom: 1rem;
+    }
+    .card {
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        padding: 1rem;
+        background: linear-gradient(180deg, #fbfcfd 0%, #f5f9fb 100%);
+    }
+    .card h3 {
+        font-size: 0.78rem;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        color: var(--muted);
+        margin-bottom: 0.45rem;
+    }
+    .card .big { font-size: 1.5rem; font-weight: 800; }
+    .card .sub { color: var(--muted); font-size: 0.85rem; margin-top: 0.25rem; }
+    .section {
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        padding: 1rem;
+        margin-bottom: 0.85rem;
+        background: #fafcfd;
+    }
+    .section h3 { margin-bottom: 0.7rem; font-size: 1rem; }
+    .kv { display: grid; grid-template-columns: 160px 1fr; gap: 0.35rem 0.75rem; font-size: 0.92rem; }
+    .kv dt { color: var(--muted); font-weight: 600; }
+    .kv dd { word-break: break-word; }
+    .printer-list { display: grid; gap: 0.55rem; }
+    .printer-row {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 0.75rem;
+        padding: 0.7rem 0.8rem;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        background: #fff;
+        flex-wrap: wrap;
+    }
+    .printer-row .name { font-weight: 700; }
+    .printer-row .meta { color: var(--muted); font-size: 0.84rem; }
+    .actions { display: flex; gap: 0.5rem; flex-wrap: wrap; margin-top: 0.5rem; }
+    @media (max-width: 760px) {
+        .cards { grid-template-columns: 1fr; }
+        .kv { grid-template-columns: 1fr; }
+    }
+</style>
+{% endblock %}
+{% block content %}
+<div class="status-hero">
+    <div>
+        <h2 class="page-title">Status do agente</h2>
+        <p class="page-sub" style="margin-bottom: 0;">Saúde do serviço, threads WebSocket e impressoras.</p>
+    </div>
+    {% set st = health.status or 'ok' %}
+    <span class="status-pill status-{{ st }}">
+        {% if st == 'ok' %}Operacional{% elif st == 'degraded' %}Degradado{% else %}{{ st }}{% endif %}
+    </span>
+</div>
+
+<div class="cards">
+    <div class="card">
+        <h3>Banco local</h3>
+        <div class="big">
+            {% if health.database.status == 'ok' %}
+            <span class="badge badge-ok">OK</span>
+            {% else %}
+            <span class="badge badge-error">Erro</span>
+            {% endif %}
+        </div>
+        <div class="sub">SQLite do Print Agent</div>
+    </div>
+    <div class="card">
+        <h3>Threads</h3>
+        <div class="big">{{ health.threads.alive }}/{{ health.threads.total }}</div>
+        <div class="sub">ativas · {{ health.threads.monitored }} monitoradas</div>
+    </div>
+    <div class="card">
+        <h3>Impressoras</h3>
+        <div class="big">{{ health.printers.active }}/{{ health.printers.configured }}</div>
+        <div class="sub">com Device ID + Token</div>
+    </div>
+</div>
+
+<div class="section">
+    <h3>Conexão Compuchat</h3>
+    <dl class="kv">
+        <dt>WebSocket</dt>
+        <dd><code>{{ ws_url or '—' }}</code></dd>
+        <dt>UniPlus</dt>
+        <dd>
+            {% if health.uniplus and health.uniplus.enabled %}
+            <span class="badge badge-ok">Ativo</span>
+            {% if health.uniplus.db_ok %}
+            <span class="badge badge-ok">Postgres OK</span>
+            {% else %}
+            <span class="badge badge-error">Postgres falhou</span>
+            {% endif %}
+            {% else %}
+            <span class="badge badge-muted">Desligado</span>
+            {% endif %}
+        </dd>
+        {% if health.uniplus and health.uniplus.last_error %}
+        <dt>Último erro UniPlus</dt>
+        <dd>{{ health.uniplus.last_error }}</dd>
+        {% endif %}
+        <dt>Atualizado em</dt>
+        <dd>{{ health.timestamp }}</dd>
+    </dl>
+</div>
+
+<div class="section">
+    <h3>Impressoras configuradas</h3>
+    {% if health.printers.health %}
+    <div class="printer-list">
+        {% for p in health.printers.health %}
+        <div class="printer-row">
+            <div>
+                <div class="name">{{ p.device_id or '(sem device id)' }}</div>
+                <div class="meta">
+                    {{ p.connection_type }}
+                    {% if p.connection_type == 'network' and p.printer_ip %}
+                    · {{ p.printer_ip }}:{{ p.printer_port or 9100 }}
+                    {% endif %}
+                </div>
+            </div>
+            {% if p.accessible %}
+            <span class="badge badge-ok">Acessível</span>
+            {% else %}
+            <span class="badge badge-error">Indisponível</span>
+            {% endif %}
+        </div>
+        {% endfor %}
+    </div>
+    {% else %}
+    <p class="hint">Nenhuma impressora configurada.</p>
+    {% endif %}
+</div>
+
+<div class="actions">
+    <a href="/health" class="btn btn-ghost" target="_blank" rel="noopener">Ver JSON /health</a>
+    <a href="/logs" class="btn btn-secondary">Abrir logs</a>
+    <a href="/" class="btn">Ir para configuração</a>
+</div>
+{% endblock %}

@@ -16,8 +16,14 @@ from error_recovery import (
     DataValidator,
     thread_monitor,
 )
-from uniplus_handler import handle_uniplus_job, is_uniplus_enabled
-
+from uniplus_handler import (
+    handle_uniplus_job,
+    is_uniplus_enabled,
+    format_uniplus_log_message,
+    UniplusPermanentError,
+)
+from uniplus_handler import OperationalError as UniplusOperationalError
+from uniplus_handler import InterfaceError as UniplusInterfaceError
 try:
     import websocket
 except ImportError:
@@ -88,41 +94,79 @@ def _get_latest_printer_config(device_id: str, fallback_config: dict) -> dict:
     return fallback_config
 
 
+def _send_uniplus_ack(ws, payload: dict):
+    try:
+        ws.send(json.dumps(payload))
+    except Exception as e:
+        _log("ERROR", f"Erro ao enviar ACK UniPlus job={payload.get('job_id')}: {e}")
+
+
 def _handle_uniplus_job(ws, job_id: int, conteudo: dict):
     """Processa job UniPlus (INSERT CONTAMESA) e envia ACK."""
     _log("INFO", f"Job {job_id}: processando uniplus_job...")
     try:
         if not is_uniplus_enabled(db):
-            raise RuntimeError(
-                "UniPlus desabilitado ou sem connection string. Configure em http://localhost:5000/"
+            raise UniplusPermanentError(
+                "ERR_UNIPLUS_CONFIG: UniPlus desabilitado ou sem connection string"
             )
-        conta_id, message = handle_uniplus_job(db, conteudo or {})
-        db.add_print_log(job_id, "done", f"uniplus {message} conta={conta_id}")
+
+        @retry_with_backoff(
+            RetryConfig(
+                max_retries=2,
+                initial_delay=0.8,
+                max_delay=6.0,
+                retryable_exceptions=(UniplusOperationalError, UniplusInterfaceError),
+            )
+        )
+        def _run():
+            return handle_uniplus_job(db, conteudo or {})
+
+        result = _run()
+        conta_id = result.get("conta_id")
+        message = result.get("message") or result.get("action") or "ok"
+        log_msg = format_uniplus_log_message(result)
+        db.add_print_log(job_id, "done", log_msg, kind="uniplus", detail=result)
         ack = {
             "event": "ack",
             "job_id": job_id,
             "status": "done",
             "message": message,
             "uniplusContaId": conta_id,
+            "uniplusAction": result.get("action"),
+            "uniplusNumeromesa": result.get("numeromesa"),
+            "protocol": result.get("protocol"),
         }
-        ws.send(json.dumps(ack))
-        _log("INFO", f"Job {job_id}: UniPlus ok contaId={conta_id} ({message})")
+        _send_uniplus_ack(ws, ack)
+        _log(
+            "INFO",
+            f"Job {job_id}: UniPlus {result.get('action')} contaId={conta_id} "
+            f"mesa={result.get('numeromesa')} protocol={result.get('protocol')} "
+            f"cliente={result.get('cliente')} itens={result.get('itens_count')} "
+            f"total={result.get('valortotal')}",
+        )
     except Exception as e:
-        _log("ERROR", f"Job {job_id}: UniPlus erro: {e}")
-        db.add_print_log(job_id, "error", str(e))
-        try:
-            ws.send(
-                json.dumps(
-                    {
-                        "event": "ack",
-                        "job_id": job_id,
-                        "status": "error",
-                        "message": str(e),
-                    }
-                )
-            )
-        except Exception:
-            pass
+        permanent = isinstance(e, UniplusPermanentError)
+        msg = str(e)
+        _log("ERROR", f"Job {job_id}: UniPlus erro{' permanente' if permanent else ''}: {msg}")
+        err_detail = {
+            "action": "error",
+            "error": msg,
+            "permanent": permanent,
+            "protocol": (conteudo or {}).get("protocol"),
+            "formResponseId": (conteudo or {}).get("formResponseId"),
+            "cliente": ((conteudo or {}).get("contamesa") or {}).get("nomecliente"),
+        }
+        db.add_print_log(job_id, "error", msg, kind="uniplus", detail=err_detail)
+        _send_uniplus_ack(
+            ws,
+            {
+                "event": "ack",
+                "job_id": job_id,
+                "status": "error",
+                "message": msg,
+                "permanent": permanent,
+            },
+        )
 
 
 def _handle_print_job(ws, job_id: int, conteudo: dict, printer_config: dict):
@@ -194,10 +238,24 @@ def _handle_print_job(ws, job_id: int, conteudo: dict, printer_config: dict):
         success = _print_with_retry()
 
         status = "done" if success else "error"
-        message = "" if success else "Falha ao imprimir apÃ³s mÃºltiplas tentativas"
+        protocol = (conteudo or {}).get("protocol") or ""
+        message = "" if success else "Falha ao imprimir após múltiplas tentativas"
+        if success and protocol:
+            message = f"Impresso protocol={protocol}"
+        elif not success and protocol:
+            message = f"{message} protocol={protocol}"
 
-        db.add_print_log(job_id, status, message)
-
+        db.add_print_log(
+            job_id,
+            status,
+            message,
+            kind="print",
+            detail={
+                "protocol": protocol or None,
+                "device_id": device_id,
+                "connection_type": connection_type,
+            },
+        )
         ack = {"event": "ack", "job_id": job_id, "status": status}
         if message:
             ack["message"] = message
@@ -256,17 +314,29 @@ def _make_on_message(printer_config: dict):
                 else:
                     _log("WARN", "print_job recebido sem job_id ou conteudo")
             elif event == "uniplus_job":
+                is_valid, error_msg = DataValidator.validate_uniplus_job(data)
                 job_id = data.get("job_id")
+                if not is_valid:
+                    _log("ERROR", f"uniplus_job inválido: {error_msg}")
+                    if job_id is not None:
+                        _send_uniplus_ack(
+                            ws,
+                            {
+                                "event": "ack",
+                                "job_id": job_id,
+                                "status": "error",
+                                "message": error_msg,
+                                "permanent": True,
+                            },
+                        )
+                    return
                 conteudo = data.get("conteudo", {})
-                if job_id is not None and conteudo:
-                    threading.Thread(
-                        target=_handle_uniplus_job,
-                        args=(ws, job_id, conteudo),
-                        daemon=True,
-                        name=f"uniplus_job_{job_id}",
-                    ).start()
-                else:
-                    _log("WARN", "uniplus_job recebido sem job_id ou conteudo")
+                threading.Thread(
+                    target=_handle_uniplus_job,
+                    args=(ws, job_id, conteudo),
+                    daemon=True,
+                    name=f"uniplus_job_{job_id}",
+                ).start()
             elif event == "ready":
                 _log("INFO", f"Conectado ao SaaS (device_id={printer_config.get('device_id', '')}) - pronto para receber jobs")
         except json.JSONDecodeError as e:
