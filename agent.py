@@ -1,6 +1,7 @@
 """Cliente WebSocket para o Print Agent - conecta ao SaaS e processa jobs de impressão."""
 import json
 import logging
+import random
 import ssl
 import threading
 import time
@@ -49,11 +50,39 @@ PRINTER_RECOVERY_CHECK_INTERVAL = 5
 # WebSocket: não verificar certificado SSL (evita CERTIFICATE_VERIFY_FAILED com servidor com cert autoassinado).
 SSLOPT_WS = {"cert_reqs": ssl.CERT_NONE}
 
+# Reconexão WS: backoff por device_id (cada impressora/agente tem o próprio delay).
+WS_RETRY_MIN_SECONDS = 1.0
+WS_RETRY_MAX_SECONDS = 300.0  # 5 min — evita martelar servidor offline
+WS_RETRY_MULTIPLIER = 2.0
+WS_AUTH_ERROR_DELAY_SECONDS = 60.0  # 401: não insistir a cada segundo
+
 
 def _log(level: str, msg: str):
     """Log formatado para stdout."""
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"{ts} [{level}] {msg}")
+
+
+def _interruptible_sleep(seconds: float) -> None:
+    """Sleep que respeita _should_stop (para parar o agente sem esperar o backoff inteiro)."""
+    end = time.monotonic() + max(0.0, seconds)
+    while not _should_stop:
+        remaining = end - time.monotonic()
+        if remaining <= 0:
+            break
+        time.sleep(min(0.5, remaining))
+
+
+def _reconnect_delay_with_jitter(base_delay: float, device_id: str) -> float:
+    """
+    Delay de reconexão com jitter ±20% + offset estável por device_id.
+    Assim vários agentes/impressoras não reconectam em lockstep nem se bloqueiam mutuamente.
+    """
+    base = max(WS_RETRY_MIN_SECONDS, float(base_delay))
+    jitter = base * 0.2 * (random.random() * 2 - 1)
+    # Offset 0–2s derivado do device_id (estável entre tentativas do mesmo device)
+    device_offset = (abs(hash(device_id or "")) % 2000) / 1000.0
+    return max(WS_RETRY_MIN_SECONDS, base + jitter + device_offset)
 
 
 def _register_websocket(device_id: str, ws):
@@ -364,13 +393,8 @@ def _on_close(ws, close_status_code, close_msg):
     _log("INFO", f"Conexão fechada (code={close_status_code}, msg={close_msg})")
 
 
-def _on_open(ws):
-    """Handler de abertura WebSocket."""
-    _log("INFO", "Conexão WebSocket estabelecida")
-
-
 def _run_websocket(printer_config: dict):
-    """Loop principal do cliente WebSocket para uma impressora (reconexÃ£o exponencial)."""
+    """Loop WebSocket por impressora com backoff exponencial + jitter (rate limit local por device_id)."""
     global _should_stop
 
     if not websocket:
@@ -381,10 +405,10 @@ def _run_websocket(printer_config: dict):
         _log("WARN", "Impressora sem device_id. Configure em http://localhost:5000/")
         return
 
-    retry_delay = 1
-    max_retry_delay = 60
+    # Estado de backoff É POR THREAD/device — outros agents/devices não são afetados.
+    retry_delay = WS_RETRY_MIN_SECONDS
     consecutive_failures = 0
-    max_consecutive_failures = 10
+    logged_credentials_once = False
 
     while not _should_stop:
         latest_config = _get_latest_printer_config(base_device_id, printer_config)
@@ -393,16 +417,34 @@ def _run_websocket(printer_config: dict):
         device_id = (latest_config.get("device_id") or "").strip() or base_device_id
 
         if not ws_url or not token or not device_id:
-            _log("WARN", f"Impressora sem ws_url/token/device_id (device_id={device_id or 'vazio'}). Aguardando configuraÃ§Ã£o...")
-            time.sleep(5)
+            _log(
+                "WARN",
+                f"Impressora sem ws_url/token/device_id (device_id={device_id or 'vazio'}). "
+                f"Aguardando configuração... (próxima checagem em 15s)",
+            )
+            _interruptible_sleep(15)
             continue
 
-        # Validar URL WebSocket antes de conectar
-        if not ConnectionHealthChecker.check_websocket_url(ws_url):
-            _log("WARN", f"URL WebSocket {ws_url} nÃ£o estÃ¡ acessÃ­vel. Tentando conectar mesmo assim...")
+        # Preflight TCP: se a porta está recusada, não martelar o handshake WS.
+        if not ConnectionHealthChecker.check_websocket_url(ws_url, timeout=2.0):
+            wait_s = _reconnect_delay_with_jitter(retry_delay, device_id)
+            consecutive_failures += 1
+            _log(
+                "WARN",
+                f"URL WebSocket {ws_url} inacessível (device_id={device_id}, "
+                f"falha #{consecutive_failures}). Nova tentativa em {wait_s:.0f}s.",
+            )
+            _interruptible_sleep(wait_s)
+            retry_delay = min(retry_delay * WS_RETRY_MULTIPLIER, WS_RETRY_MAX_SECONDS)
+            continue
 
-        # Log das credenciais (sem expor o token completo por seguranÃ§a)
-        _log("INFO", f"Credenciais para device_id={device_id}: token_length={len(token)}, token_preview={token[:20] if len(token) > 20 else token}...")
+        if not logged_credentials_once:
+            _log(
+                "INFO",
+                f"Credenciais para device_id={device_id}: token_length={len(token)}, "
+                f"token_preview={token[:20] if len(token) > 20 else token}...",
+            )
+            logged_credentials_once = True
 
         on_message = _make_on_message(latest_config)
         extra_headers = {
@@ -410,16 +452,35 @@ def _run_websocket(printer_config: dict):
             "X-Device-Id": device_id,
         }
 
+        connected = threading.Event()
+        auth_failed = {"value": False}
+
+        def on_open(ws):
+            connected.set()
+            consecutive_local = consecutive_failures  # só para log
+            _log(
+                "INFO",
+                f"Conexão WebSocket estabelecida (device_id={device_id})"
+                + (f" após {consecutive_local} falha(s)" if consecutive_local else ""),
+            )
+
+        def on_error(ws, error):
+            _on_error(ws, error)
+            if error and ("401" in str(error) or "Unauthorized" in str(error)):
+                auth_failed["value"] = True
+
         _log("INFO", f"Conectando a {ws_url} (device_id={device_id})...")
 
+        session_opened = False
+        had_exception = False
         try:
             ws = websocket.WebSocketApp(
                 ws_url,
                 header=extra_headers,
                 on_message=on_message,
-                on_error=_on_error,
+                on_error=on_error,
                 on_close=_on_close,
-                on_open=_on_open,
+                on_open=on_open,
             )
             _register_websocket(device_id, ws)
 
@@ -432,23 +493,53 @@ def _run_websocket(printer_config: dict):
             finally:
                 _unregister_websocket(device_id, ws)
 
-            consecutive_failures = 0
-            retry_delay = 1
+            session_opened = connected.is_set()
         except Exception as e:
+            had_exception = True
             consecutive_failures += 1
-            _log("ERROR", f"Erro de conexÃ£o (device_id={device_id}): {e} (falhas consecutivas: {consecutive_failures})")
-
-            # Se muitas falhas consecutivas, aumentar delay
-            if consecutive_failures >= max_consecutive_failures:
-                _log("WARN", f"Muitas falhas consecutivas ({consecutive_failures}). Aumentando delay de reconexÃ£o...")
-                retry_delay = min(retry_delay * 2, max_retry_delay)
+            _log(
+                "ERROR",
+                f"Erro de conexão (device_id={device_id}): {e} "
+                f"(falhas consecutivas: {consecutive_failures})",
+            )
+            session_opened = False
 
         if _should_stop:
             break
 
-        _log("INFO", f"Reconectando em {retry_delay}s (device_id={device_id})...")
-        time.sleep(retry_delay)
-        retry_delay = min(retry_delay * 2, max_retry_delay)
+        if session_opened:
+            # Sessão chegou a abrir: reset do backoff deste device.
+            consecutive_failures = 0
+            retry_delay = WS_RETRY_MIN_SECONDS
+            wait_s = _reconnect_delay_with_jitter(retry_delay, device_id)
+            _log("INFO", f"Reconectando em {wait_s:.0f}s (device_id={device_id})...")
+            _interruptible_sleep(wait_s)
+            continue
+
+        # Não abriu (connection refused, timeout, etc.) — backoff só deste device_id.
+        if not had_exception:
+            consecutive_failures += 1
+        if auth_failed["value"]:
+            wait_s = _reconnect_delay_with_jitter(WS_AUTH_ERROR_DELAY_SECONDS, device_id)
+            _log(
+                "WARN",
+                f"Auth falhou (401). Aguardando {wait_s:.0f}s antes de nova tentativa "
+                f"(device_id={device_id}) — outros devices não são afetados.",
+            )
+            retry_delay = min(
+                max(retry_delay, WS_AUTH_ERROR_DELAY_SECONDS),
+                WS_RETRY_MAX_SECONDS,
+            )
+        else:
+            wait_s = _reconnect_delay_with_jitter(retry_delay, device_id)
+            _log(
+                "WARN",
+                f"Falha ao conectar WS (device_id={device_id}, falha #{consecutive_failures}). "
+                f"Nova tentativa em {wait_s:.0f}s (backoff local; outros agents seguem independentes).",
+            )
+            retry_delay = min(retry_delay * WS_RETRY_MULTIPLIER, WS_RETRY_MAX_SECONDS)
+
+        _interruptible_sleep(wait_s)
 
 
 def start_agent_thread():
