@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import re
+import uuid
 import unicodedata
 from datetime import datetime, timezone
 from typing import Any, Dict, Tuple
@@ -30,7 +31,20 @@ class UniplusPermanentError(RuntimeError):
 
 
 def _pad_hash(value: str) -> str:
-    s = (value or "").replace("-", "")
+    """UUID com hífens (Java UUID.fromString) + pad CHAR(40).
+
+    Hash sem hífen falha no parse do UniPlus → ContaCliente.hash=null →
+    NPE em OperacaoDAO.existeOperacaoPendenteUnichef ao abrir/finalizar delivery.
+    """
+    s = (value or "").strip()
+    hex_only = s.replace("-", "").replace(" ", "")
+    if len(hex_only) == 32 and all(c in "0123456789abcdefABCDEF" for c in hex_only):
+        s = (
+            f"{hex_only[:8]}-{hex_only[8:12]}-{hex_only[12:16]}-"
+            f"{hex_only[16:20]}-{hex_only[20:32]}"
+        )
+    elif not s:
+        s = str(uuid.uuid4())
     return (s + (" " * 40))[:40]
 
 
