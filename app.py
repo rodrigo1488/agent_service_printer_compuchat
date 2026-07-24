@@ -358,7 +358,7 @@ def products_page():
     list_error = None
     if uniplus_on:
         try:
-        products = product_sync.list_uniplus_products(q=q, limit=2000)
+            products = product_sync.list_uniplus_products(q=q, limit=2000)
             for p in products:
                 local = enabled_map.get(p["codigo"]) or {}
                 p["sync_enabled"] = bool(local.get("enabled"))
