@@ -647,15 +647,18 @@ def handle_uniplus_job(db_module, conteudo: Dict[str, Any]) -> Dict[str, Any]:
                 for item in itens:
                     codigo = str(item.get("codigoproduto") or "").strip()
                     nome = str(item.get("nomeproduto") or "")[:120]
-                    if not codigo:
+                    if not codigo and not nome:
                         raise UniplusPermanentError(
-                            "ERR_UNIPLUS_PAYLOAD: Item sem codigoproduto "
-                            "(informe produto.codigo do UniPlus, não o id interno)"
+                            "ERR_UNIPLUS_PAYLOAD: Item sem codigoproduto/nomeproduto"
                         )
                     idproduto, codigo_resolvido = _resolve_produto_id(
                         cur, cfg, codigo, nome
                     )
                     codigo = str(codigo_resolvido or codigo).strip()
+                    if not codigo:
+                        raise UniplusPermanentError(
+                            f"ERR_UNIPLUS_PRODUCT_NOT_FOUND: nome={nome or '-'}"
+                        )
                     qty = float(item.get("quantidade") or 1)
                     precounitario = float(item.get("precounitario") or 0)
                     valortotal = float(item.get("valortotal") or (precounitario * qty))
