@@ -8,6 +8,7 @@ from flask_cors import CORS
 
 import db
 from agent import start_agent_thread, stop_agent
+from product_sync import start_product_sync_thread
 from error_recovery import DataValidator, DatabaseRecovery
 
 # Tentar importar win32print para listar impressoras locais (Windows)
@@ -47,6 +48,8 @@ def _config_context():
     uniplus_produto_table = db.get_config("uniplus_produto_table") or "produto"
     uniplus_produto_codigo_column = db.get_config("uniplus_produto_codigo_column") or "codigo"
     uniplus_produto_id_column = db.get_config("uniplus_produto_id_column") or "id"
+    uniplus_produto_preco_column = db.get_config("uniplus_produto_preco_column") or "preco"
+    uniplus_produto_nome_column = db.get_config("uniplus_produto_nome_column") or "nome"
     uniplus_contamesa_table = db.get_config("uniplus_contamesa_table") or "contamesa"
     uniplus_contamesaitem_table = db.get_config("uniplus_contamesaitem_table") or "contamesaitem"
     return {
@@ -59,6 +62,8 @@ def _config_context():
         "uniplus_produto_table": uniplus_produto_table,
         "uniplus_produto_codigo_column": uniplus_produto_codigo_column,
         "uniplus_produto_id_column": uniplus_produto_id_column,
+        "uniplus_produto_preco_column": uniplus_produto_preco_column,
+        "uniplus_produto_nome_column": uniplus_produto_nome_column,
         "uniplus_contamesa_table": uniplus_contamesa_table,
         "uniplus_contamesaitem_table": uniplus_contamesaitem_table,
     }
@@ -170,6 +175,8 @@ def config():
                 "uniplus_produto_table": request.form.get("uniplus_produto_table", "produto").strip() or "produto",
                 "uniplus_produto_codigo_column": request.form.get("uniplus_produto_codigo_column", "codigo").strip() or "codigo",
                 "uniplus_produto_id_column": request.form.get("uniplus_produto_id_column", "id").strip() or "id",
+                "uniplus_produto_preco_column": request.form.get("uniplus_produto_preco_column", "preco").strip() or "preco",
+                "uniplus_produto_nome_column": request.form.get("uniplus_produto_nome_column", "nome").strip() or "nome",
                 "uniplus_contamesa_table": request.form.get("uniplus_contamesa_table", "contamesa").strip() or "contamesa",
                 "uniplus_contamesaitem_table": request.form.get("uniplus_contamesaitem_table", "contamesaitem").strip()
                 or "contamesaitem",
@@ -331,6 +338,99 @@ def logs():
     )
 
 
+@app.route("/products")
+def products_page():
+    """Lista produtos UniPlus e marca sync automático."""
+    import product_sync
+
+    q = (request.args.get("q") or "").strip()
+    message = request.args.get("message")
+    message_type = request.args.get("message_type", "success")
+    uniplus_on = (db.get_config("uniplus_enabled") or "false").lower() in (
+        "true",
+        "1",
+        "yes",
+        "on",
+    )
+    products = []
+    enabled_map = {p["codigo"]: p for p in db.list_sync_products()}
+    enabled_count = sum(1 for p in enabled_map.values() if p.get("enabled"))
+    list_error = None
+    if uniplus_on:
+        try:
+        products = product_sync.list_uniplus_products(q=q, limit=2000)
+            for p in products:
+                local = enabled_map.get(p["codigo"]) or {}
+                p["sync_enabled"] = bool(local.get("enabled"))
+                p["last_synced_at"] = local.get("last_synced_at")
+                p["last_error"] = local.get("last_error") or ""
+        except Exception as e:
+            list_error = str(e)
+            message = f"Erro ao listar produtos UniPlus: {e}"
+            message_type = "error"
+    return render_template(
+        "products.html",
+        active_nav="products",
+        products=products,
+        enabled_count=enabled_count,
+        q=q,
+        uniplus_enabled=uniplus_on,
+        message=message,
+        message_type=message_type,
+        list_error=list_error,
+    )
+
+
+@app.route("/products/toggle", methods=["POST"])
+def products_toggle():
+    import product_sync
+
+    codigo = (request.form.get("codigo") or "").strip()
+    enabled = request.form.get("enabled") == "1"
+    q = (request.form.get("q") or "").strip()
+    try:
+        result = product_sync.enable_product(codigo, enabled=enabled)
+        if enabled and not result.get("ok"):
+            msg = f"Marcado, mas sync falhou: {result.get('error')}"
+            mtype = "error"
+        elif enabled:
+            action = (result.get("result") or {}).get("action") or "ok"
+            msg = f"Sync automático ON ({codigo}) — {action}"
+            mtype = "success"
+        else:
+            msg = f"Sync automático OFF ({codigo})"
+            mtype = "success"
+    except Exception as e:
+        msg = str(e)
+        mtype = "error"
+    return redirect(
+        url_for("products_page", q=q, message=msg, message_type=mtype)
+    )
+
+
+@app.route("/products/sync-now", methods=["POST"])
+def products_sync_now():
+    import product_sync
+
+    codigo = (request.form.get("codigo") or "").strip()
+    q = (request.form.get("q") or "").strip()
+    try:
+        result = product_sync.sync_one(codigo, force=True)
+        if result.get("ok"):
+            action = (result.get("result") or {}).get("action") or "ok"
+            msg = f"Sincronizado {codigo}: {action}"
+            mtype = "success"
+        else:
+            msg = f"Falha {codigo}: {result.get('error')}"
+            mtype = "error"
+    except Exception as e:
+        msg = str(e)
+        mtype = "error"
+    return redirect(
+        url_for("products_page", q=q, message=msg, message_type=mtype)
+    )
+
+
 @app.route("/api/logs")
 def api_logs():
     """API JSON para auto-refresh da tela de logs."""
@@ -485,15 +585,18 @@ if __name__ == "__main__":
         except ImportError as e:
             print("Erro ao iniciar bandeja (instale: pip install pystray Pillow):", e)
             start_agent_thread()
+            start_product_sync_thread()
             run_flask()
     else:
         print("=" * 50)
         print("Print Agent - WebSocket")
         print("=" * 50)
         print("Interface: http://localhost:5000/")
+        print("Produtos:  http://localhost:5000/products")
         print("Logs:      http://localhost:5000/logs")
         print("Status:    http://localhost:5000/status")
         print("Health:    http://localhost:5000/health")
         print("=" * 50)
         start_agent_thread()
+        start_product_sync_thread()
         run_flask()

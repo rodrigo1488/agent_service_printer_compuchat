@@ -78,6 +78,7 @@ def run_tray(run_flask_callable):
 
     # Importar agente após redirecionar para que prints vão para o log
     from agent import start_agent_thread, stop_agent
+    from product_sync import start_product_sync_thread
 
     # Iniciar Flask em thread (callable passado para evitar re-importar app)
     flask_thread = threading.Thread(target=run_flask_callable, daemon=True)
@@ -85,6 +86,7 @@ def run_tray(run_flask_callable):
     time.sleep(1.2)
 
     start_agent_thread()
+    start_product_sync_thread()
 
     try:
         import pystray

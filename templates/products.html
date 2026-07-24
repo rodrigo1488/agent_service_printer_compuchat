@@ -1,0 +1,95 @@
+{% extends "base.html" %}
+{% block title %}Produtos UniPlus — Print Agent{% endblock %}
+{% block content %}
+<div class="panel">
+    <h2 class="page-title">Produtos UniPlus</h2>
+    <p class="page-sub">
+        Marque os produtos para sincronização automática com o Compuchat (nome + preço).
+        Alterações no UniPlus sobem em até ~30s. Chave: campo <strong>codigo</strong> (não o id interno).
+    </p>
+
+    {% if message %}
+    <div class="alert alert-{{ message_type or 'success' }}">{{ message }}</div>
+    {% endif %}
+
+    {% if not uniplus_enabled %}
+    <div class="alert alert-error">Ative o UniPlus em Configuração → UniPlus para listar produtos.</div>
+    {% else %}
+
+    <form method="get" action="{{ url_for('products_page') }}" style="display:flex; gap:0.6rem; margin-bottom:1rem; flex-wrap:wrap;">
+        <input type="search" name="q" value="{{ q or '' }}" placeholder="Buscar código ou nome…" style="flex:1; min-width:200px; padding:0.55rem 0.75rem; border:1px solid var(--line); border-radius:10px;">
+        <button type="submit" class="btn">Buscar</button>
+        <a class="btn btn-secondary" href="{{ url_for('products_page') }}">Limpar</a>
+    </form>
+
+    <div style="overflow:auto;">
+        <table class="table" style="width:100%; border-collapse:collapse; font-size:0.9rem;">
+            <thead>
+                <tr style="text-align:left; border-bottom:1px solid var(--line); color:var(--muted);">
+                    <th style="padding:0.5rem;">Sync</th>
+                    <th style="padding:0.5rem;">Código</th>
+                    <th style="padding:0.5rem;">Nome</th>
+                    <th style="padding:0.5rem;">Preço</th>
+                    <th style="padding:0.5rem;">Status</th>
+                    <th style="padding:0.5rem;"></th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for p in products %}
+                <tr style="border-bottom:1px solid var(--line);">
+                    <td style="padding:0.55rem;">
+                        <form method="post" action="{{ url_for('products_toggle') }}" style="margin:0;">
+                            <input type="hidden" name="codigo" value="{{ p.codigo }}">
+                            <input type="hidden" name="q" value="{{ q or '' }}">
+                            <label style="display:inline-flex; align-items:center; gap:0.35rem; cursor:pointer; font-weight:600;">
+                                <input type="checkbox" name="enabled" value="1" {% if p.sync_enabled %}checked{% endif %}
+                                       onchange="this.form.submit()">
+                                {% if p.sync_enabled %}ON{% else %}off{% endif %}
+                            </label>
+                        </form>
+                    </td>
+                    <td style="padding:0.55rem; font-family:ui-monospace, monospace;">{{ p.codigo }}</td>
+                    <td style="padding:0.55rem;">{{ p.nome }}{% if p.inativo %}<span style="color:var(--muted); font-size:0.75rem;"> (inativo)</span>{% endif %}</td>
+                    <td style="padding:0.55rem;">R$ {{ '%.2f'|format(p.preco|float) }}</td>
+                    <td style="padding:0.55rem; font-size:0.82rem;">
+                        {% if p.sync_enabled %}
+                            {% if p.last_error %}
+                                <span style="color:var(--danger);">{{ p.last_error[:80] }}</span>
+                            {% elif p.last_synced_at %}
+                                <span style="color:var(--ok);">OK {{ p.last_synced_at }}</span>
+                            {% else %}
+                                <span style="color:var(--warn);">pendente</span>
+                            {% endif %}
+                        {% else %}
+                            <span style="color:var(--muted);">—</span>
+                        {% endif %}
+                    </td>
+                    <td style="padding:0.55rem;">
+                        {% if p.sync_enabled %}
+                        <form method="post" action="{{ url_for('products_sync_now') }}" style="margin:0;">
+                            <input type="hidden" name="codigo" value="{{ p.codigo }}">
+                            <input type="hidden" name="q" value="{{ q or '' }}">
+                            <button type="submit" class="btn btn-secondary" style="padding:0.3rem 0.6rem; font-size:0.8rem;">Sync agora</button>
+                        </form>
+                        {% endif %}
+                    </td>
+                </tr>
+                {% else %}
+                <tr>
+                    <td colspan="6" style="padding:1rem; color:var(--muted);">Nenhum produto encontrado.</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    <p style="margin-top:0.8rem; color:var(--muted); font-size:0.85rem;">
+        {{ products|length }} produto(s) listado(s) · {{ enabled_count }} em sync automático
+        {% if list_error %}<br><span style="color:var(--danger);">{{ list_error }}</span>{% endif %}
+    </p>
+    <p class="hint">
+        Se aparecer só 1 item, confira em Configuração → UniPlus se a tabela/DSN apontam para o banco correto
+        (<code>produto</code>) e se o Postgres UniPlus está acessível nesta máquina.
+    </p>
+    {% endif %}
+</div>
+{% endblock %}

@@ -3,7 +3,7 @@ import sqlite3
 import json
 import os
 from datetime import datetime
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 from error_recovery import (
     DatabaseRecovery,
@@ -29,6 +29,8 @@ DEFAULT_CONFIG = {
     "uniplus_produto_id_column": "id",
     "uniplus_contamesa_table": "contamesa",
     "uniplus_contamesaitem_table": "contamesaitem",
+    "uniplus_produto_preco_column": "preco",
+    "uniplus_produto_nome_column": "nome",
     "uniplus_last_error": "",
 }
 PRINTER_KEYS = ("device_id", "token", "printer_ip", "printer_port", "printer_type", "paper_width", "printer_encoding", "name", "connection_type", "printer_name_local")
@@ -79,6 +81,17 @@ def init_db():
             conn.execute("ALTER TABLE print_logs ADD COLUMN kind TEXT DEFAULT 'print'")
         if "detail" not in cols:
             conn.execute("ALTER TABLE print_logs ADD COLUMN detail TEXT")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS uniplus_sync_products (
+                codigo TEXT PRIMARY KEY,
+                nome TEXT,
+                preco REAL,
+                fingerprint TEXT,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                last_synced_at TIMESTAMP,
+                last_error TEXT
+            )
+        """)
         conn.commit()
 
         cursor = conn.execute("SELECT COUNT(*) FROM config")
@@ -99,6 +112,138 @@ def init_db():
             conn.commit()
     finally:
         conn.close()
+
+
+# --- Sync de produtos UniPlus → Compuchat ---
+
+
+def list_sync_products(enabled_only: bool = False) -> List[Dict[str, Any]]:
+    conn = _get_connection()
+    try:
+        sql = (
+            "SELECT codigo, nome, preco, fingerprint, enabled, last_synced_at, last_error "
+            "FROM uniplus_sync_products"
+        )
+        if enabled_only:
+            sql += " WHERE enabled = 1"
+        sql += " ORDER BY nome COLLATE NOCASE, codigo"
+        rows = conn.execute(sql).fetchall()
+        return [
+            {
+                "codigo": r[0],
+                "nome": r[1] or "",
+                "preco": float(r[2] or 0),
+                "fingerprint": r[3] or "",
+                "enabled": bool(r[4]),
+                "last_synced_at": r[5],
+                "last_error": r[6] or "",
+            }
+            for r in rows
+        ]
+    finally:
+        conn.close()
+
+
+def get_sync_product(codigo: str) -> Optional[Dict[str, Any]]:
+    conn = _get_connection()
+    try:
+        row = conn.execute(
+            "SELECT codigo, nome, preco, fingerprint, enabled, last_synced_at, last_error "
+            "FROM uniplus_sync_products WHERE codigo = ?",
+            (str(codigo).strip(),),
+        ).fetchone()
+        if not row:
+            return None
+        return {
+            "codigo": row[0],
+            "nome": row[1] or "",
+            "preco": float(row[2] or 0),
+            "fingerprint": row[3] or "",
+            "enabled": bool(row[4]),
+            "last_synced_at": row[5],
+            "last_error": row[6] or "",
+        }
+    finally:
+        conn.close()
+
+
+def set_sync_product_enabled(
+    codigo: str,
+    enabled: bool,
+    *,
+    nome: str = "",
+    preco: float = 0.0,
+) -> None:
+    codigo = str(codigo).strip()
+    if not codigo:
+        return
+    conn = _get_connection()
+    try:
+        existing = conn.execute(
+            "SELECT codigo FROM uniplus_sync_products WHERE codigo = ?", (codigo,)
+        ).fetchone()
+        if existing:
+            conn.execute(
+                "UPDATE uniplus_sync_products SET enabled = ?, nome = COALESCE(NULLIF(?, ''), nome), "
+                "preco = CASE WHEN ? >= 0 THEN ? ELSE preco END WHERE codigo = ?",
+                (1 if enabled else 0, nome or "", float(preco), float(preco), codigo),
+            )
+        else:
+            conn.execute(
+                "INSERT INTO uniplus_sync_products "
+                "(codigo, nome, preco, fingerprint, enabled, last_synced_at, last_error) "
+                "VALUES (?, ?, ?, '', ?, NULL, '')",
+                (codigo, nome or "", float(preco or 0), 1 if enabled else 0),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def update_sync_product_state(
+    codigo: str,
+    *,
+    nome: Optional[str] = None,
+    preco: Optional[float] = None,
+    fingerprint: Optional[str] = None,
+    last_error: Optional[str] = None,
+    synced: bool = False,
+) -> None:
+    codigo = str(codigo).strip()
+    if not codigo:
+        return
+    conn = _get_connection()
+    try:
+        sets = []
+        params: list = []
+        if nome is not None:
+            sets.append("nome = ?")
+            params.append(nome)
+        if preco is not None:
+            sets.append("preco = ?")
+            params.append(float(preco))
+        if fingerprint is not None:
+            sets.append("fingerprint = ?")
+            params.append(fingerprint)
+        if last_error is not None:
+            sets.append("last_error = ?")
+            params.append(last_error)
+        if synced:
+            sets.append("last_synced_at = CURRENT_TIMESTAMP")
+        if not sets:
+            return
+        params.append(codigo)
+        conn.execute(
+            f"UPDATE uniplus_sync_products SET {', '.join(sets)} WHERE codigo = ?",
+            params,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_enabled_sync_codigos() -> List[str]:
+    return [p["codigo"] for p in list_sync_products(enabled_only=True)]
 
 
 def get_config(key: str) -> str:
