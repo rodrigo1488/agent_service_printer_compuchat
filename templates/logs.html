@@ -275,8 +275,57 @@
         return 'R$ ' + n.toFixed(2).replace('.', ',');
     }
 
+    function renderPrintDetailHtml(detail) {
+        var html = '<div class="detail-grid">' +
+            '<div><div class="k">Tipo</div><div class="v"><span class="badge badge-kind-print">impressão</span></div></div>' +
+            '<div><div class="k">Protocolo</div><div class="v">' + escapeHtml(detail.protocol || '—') + '</div></div>' +
+            '<div><div class="k">FormResponse</div><div class="v">' + escapeHtml(detail.formResponseId || '—') + '</div></div>' +
+            '<div><div class="k">Formulário</div><div class="v">' + escapeHtml(detail.formName || '—') + '</div></div>' +
+            '<div><div class="k">Cliente</div><div class="v">' + escapeHtml(detail.cliente || '—') + '</div></div>' +
+            '<div><div class="k">Telefone</div><div class="v">' + escapeHtml(detail.telefone || '—') + '</div></div>' +
+            '<div><div class="k">Mesa / cardápio</div><div class="v">' + escapeHtml(detail.tableNumber || '—') + '</div></div>' +
+            '<div><div class="k">Garçom</div><div class="v">' + escapeHtml(detail.garcomName || '—') + '</div></div>' +
+            '<div><div class="k">Subtotal</div><div class="v">' + money(detail.subtotal) + '</div></div>' +
+            '<div><div class="k">Entrega</div><div class="v">' + money(detail.valorentrega) + '</div></div>' +
+            '<div><div class="k">Total</div><div class="v">' + money(detail.valortotal) + '</div></div>' +
+            '<div><div class="k">Device</div><div class="v">' + escapeHtml(detail.device_id || '—') + '</div></div>' +
+            '<div><div class="k">Impressora</div><div class="v">' + escapeHtml(
+                detail.connection_type === 'local'
+                    ? (detail.printer_name_local || 'local')
+                    : (detail.printer_ip || detail.connection_type || '—')
+            ) + '</div></div>' +
+            '</div>';
+        var itens = detail.itens || [];
+        if (itens.length) {
+            html += '<p class="hint" style="margin:0.75rem 0 0.5rem;">Itens do cupom (' + itens.length +
+                (detail.itens_count && detail.itens_count > itens.length ? ' de ' + detail.itens_count : '') +
+                '):</p>';
+            html += '<table class="items-table"><thead><tr>' +
+                '<th>Grupo</th><th>Produto</th><th>Qtd</th><th>Total</th>' +
+                '</tr></thead><tbody>';
+            itens.forEach(function(it) {
+                html += '<tr>' +
+                    '<td>' + escapeHtml(it.grupo || '—') + '</td>' +
+                    '<td>' + escapeHtml(it.nome || '—') + '</td>' +
+                    '<td>' + escapeHtml(it.qtd) + '</td>' +
+                    '<td>' + money(it.total) + '</td>' +
+                    '</tr>';
+            });
+            html += '</tbody></table>';
+        }
+        return html;
+    }
+
     function renderDetailHtml(detail) {
         if (!detail || typeof detail !== 'object') return '<p class="hint">Sem detalhe.</p>';
+
+        // PRINT: não usar layout UniPlus (conta/mesa/tabelas)
+        var isPrint = detail.kind === 'print' ||
+            (!detail.action && !detail.conta_id && detail.device_id != null);
+        if (isPrint && detail.action !== 'created' && detail.action !== 'already_exists') {
+            return renderPrintDetailHtml(detail);
+        }
+
         if (detail.action === 'error' || detail.error) {
             return '<p><strong>Erro:</strong> ' + escapeHtml(detail.error || '—') + '</p>' +
                 '<p class="hint">protocol=' + escapeHtml(detail.protocol || '—') +
@@ -287,9 +336,12 @@
             : detail.action === 'created'
                 ? '<span class="badge badge-action-created">INSERT novo</span>'
                 : escapeHtml(detail.action || '—');
+        var contaTxt = detail.conta_id != null && detail.conta_id !== ''
+            ? ('#' + escapeHtml(detail.conta_id))
+            : '—';
         var html = '<div class="detail-grid">' +
             '<div><div class="k">Ação</div><div class="v">' + actionLabel + '</div></div>' +
-            '<div><div class="k">Conta UniPlus</div><div class="v">#' + escapeHtml(detail.conta_id) + '</div></div>' +
+            '<div><div class="k">Conta UniPlus</div><div class="v">' + contaTxt + '</div></div>' +
             '<div><div class="k">Nº mesa (card)</div><div class="v">' + escapeHtml(detail.numeromesa != null ? detail.numeromesa : '—') + '</div></div>' +
             '<div><div class="k">Protocolo</div><div class="v">' + escapeHtml(detail.protocol || '—') + '</div></div>' +
             '<div><div class="k">FormResponse</div><div class="v">' + escapeHtml(detail.formResponseId || '—') + '</div></div>' +

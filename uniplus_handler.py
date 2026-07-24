@@ -174,14 +174,27 @@ def _summarize_payload(
     }
 
 
-def _next_numeromesa(cur, mesa_table: str) -> int:
-    cur.execute(
-        f"""
-        SELECT COALESCE(MAX(numeromesa), 0) + 1 AS next_num
-        FROM {mesa_table}
-        WHERE status = 1 AND tipopedido = 0
-        """
-    )
+def _next_numeromesa(cur, mesa_table: str, *, open_delivery_only: bool = True) -> int:
+    """
+    Próximo card delivery.
+    open_delivery_only=True: só entre contas abertas tipopedido=0 (comportamento Gourmet).
+    open_delivery_only=False: MAX global — usado no retry após colisão de unique.
+    """
+    if open_delivery_only:
+        cur.execute(
+            f"""
+            SELECT COALESCE(MAX(numeromesa), 0) + 1 AS next_num
+            FROM {mesa_table}
+            WHERE status = 1 AND tipopedido = 0
+            """
+        )
+    else:
+        cur.execute(
+            f"""
+            SELECT COALESCE(MAX(numeromesa), 0) + 1 AS next_num
+            FROM {mesa_table}
+            """
+        )
     row = cur.fetchone()
     next_num = int(row["next_num"] if isinstance(row, dict) else row[0])
     return max(next_num, 1)
@@ -248,6 +261,128 @@ def format_uniplus_log_message(result: Dict[str, Any]) -> str:
     )
 
 
+def _table_columns(cur, table: str) -> set:
+    """Colunas da tabela no schema atual (lowercase)."""
+    cur.execute(
+        """
+        SELECT lower(column_name) AS col
+        FROM information_schema.columns
+        WHERE lower(table_name) = lower(%s)
+          AND table_schema = current_schema()
+        """,
+        (table,),
+    )
+    rows = cur.fetchall() or []
+    cols = set()
+    for row in rows:
+        if isinstance(row, dict):
+            cols.add(str(row.get("col") or "").lower())
+        else:
+            cols.add(str(row[0]).lower())
+    return cols
+
+
+def _is_undefined_column_error(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    pgcode = getattr(exc, "pgcode", None)
+    return pgcode == "42703" or "undefined column" in msg or "does not exist" in msg
+
+
+def _insert_contamesa(
+    cur,
+    mesa_table: str,
+    contamesa: Dict[str, Any],
+    protocol_key: str,
+    numeromesa: int,
+    hash_val: str,
+    now: datetime,
+    include_optional: bool,
+) -> int:
+    """INSERT CONTAMESA. include_optional controla statusagendamento/pautaunica."""
+    base_cols = [
+        "tipopedido", "status", "situacao", "numeromesa",
+        "idfilial", "idusuario", "idcliente", "codigocliente",
+        "nomecliente", "telefone", "documento",
+        "endereco", "endereconumero", "enderecobairro",
+        "enderecocomplemento", "enderecoreferencia",
+        "valorentrega", "valortotal", "valorcombinado",
+        "valordinheiro", "valorcartao", "valorpix",
+        "valorcarteiradigital", "valoroutros", "valorcheque",
+        "tipointegracao", "nomeintegracao", "orderidintegracao",
+        "hash", "statussinc", "cupomcancelado",
+        "retiradanobalcao", "retirabalcaodepois", "paraviagem",
+        "numeropessoas", "desconto", "obs",
+        "data", "horaabertura", "horaultimoconsumo",
+        "currenttimemillis", "timestampalteracao",
+    ]
+    base_values = [
+        int(contamesa.get("tipopedido") or 0),
+        int(contamesa.get("status") or 1),
+        int(contamesa.get("situacao") or 0),
+        numeromesa,
+        int(contamesa.get("idfilial") or 1),
+        int(contamesa.get("idusuario") or 1),
+        int(contamesa.get("idcliente") or 0),
+        str(contamesa.get("codigocliente") or "")[:14],
+        str(contamesa.get("nomecliente") or "Cliente")[:60],
+        str(contamesa.get("telefone") or "")[:20],
+        str(contamesa.get("documento") or "")[:18],
+        str(contamesa.get("endereco") or "")[:60],
+        str(contamesa.get("endereconumero") or "")[:12],
+        str(contamesa.get("enderecobairro") or "")[:255],
+        str(contamesa.get("enderecocomplemento") or "")[:255],
+        str(contamesa.get("enderecoreferencia") or "")[:255],
+        float(contamesa.get("valorentrega") or 0),
+        float(contamesa.get("valortotal") or 0),
+        float(contamesa.get("valorcombinado") or contamesa.get("valortotal") or 0),
+        float(contamesa.get("valordinheiro") or 0),
+        float(contamesa.get("valorcartao") or 0),
+        float(contamesa.get("valorpix") or 0),
+        float(contamesa.get("valorcarteiradigital") or 0),
+        float(contamesa.get("valoroutros") or 0),
+        float(contamesa.get("valorcheque") or 0),
+        int(contamesa.get("tipointegracao") or 0),
+        str(contamesa.get("nomeintegracao") or "")[:64],
+        protocol_key,
+        hash_val,
+        int(contamesa.get("statussinc") or 1),
+        int(contamesa.get("cupomcancelado") or 0),
+        int(contamesa.get("retiradanobalcao") or 0),
+        int(contamesa.get("retirabalcaodepois") or 0),
+        int(contamesa.get("paraviagem") or 0),
+        int(contamesa.get("numeropessoas") or 1),
+        float(contamesa.get("desconto") or 0),
+        str(contamesa.get("obs") or "")[:255],
+        contamesa.get("data") or now.date().isoformat(),
+        contamesa.get("horaabertura") or now.isoformat(),
+        contamesa.get("horaultimoconsumo") or now.isoformat(),
+        int(contamesa.get("currenttimemillis") or int(now.timestamp() * 1000)),
+        int(contamesa.get("timestampalteracao") or int(now.timestamp() * 1000)),
+    ]
+
+    cols = list(base_cols)
+    values = list(base_values)
+    if include_optional:
+        cols.extend(["statusagendamento", "pautaunica"])
+        values.append(int(contamesa.get("statusagendamento") or 3))
+        values.append(
+            int(
+                contamesa.get("pautaunica")
+                if contamesa.get("pautaunica") is not None
+                else 1
+            )
+        )
+
+    placeholders = ",".join(["%s"] * len(values))
+    sql = (
+        f"INSERT INTO {mesa_table} ({', '.join(cols)}) "
+        f"VALUES ({placeholders}) RETURNING id"
+    )
+    cur.execute(sql, tuple(values))
+    row = cur.fetchone()
+    return int(row["id"] if isinstance(row, dict) else row[0])
+
+
 def handle_uniplus_job(db_module, conteudo: Dict[str, Any]) -> Dict[str, Any]:
     """
     Insere delivery aberto.
@@ -293,7 +428,8 @@ def handle_uniplus_job(db_module, conteudo: Dict[str, Any]) -> Dict[str, Any]:
     try:
         with conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                # Serializa inserts do mesmo protocol e alocação de numeromesa
+                # Lock global de numeromesa + lock do protocol (idempotência)
+                cur.execute("SELECT pg_advisory_xact_lock(%s)", (872014001,))
                 cur.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (protocol_key,))
 
                 existing_result = _existing_by_protocol(cur, mesa_table, protocol_key, summary)
@@ -306,101 +442,101 @@ def handle_uniplus_job(db_module, conteudo: Dict[str, Any]) -> Dict[str, Any]:
                     )
                     return existing_result
 
-                numeromesa = _next_numeromesa(cur, mesa_table)
-                hash_val = _pad_hash(str(contamesa.get("hash") or ""))
-                insert_mesa = f"""
-                    INSERT INTO {mesa_table} (
-                        tipopedido, status, situacao, numeromesa,
-                        idfilial, idusuario, idcliente, codigocliente,
-                        nomecliente, telefone, documento,
-                        endereco, endereconumero, enderecobairro,
-                        enderecocomplemento, enderecoreferencia,
-                        valorentrega, valortotal, valorcombinado,
-                        valordinheiro, valorcartao, valorpix,
-                        valorcarteiradigital, valoroutros, valorcheque,
-                        tipointegracao, nomeintegracao, orderidintegracao,
-                        hash, statussinc, cupomcancelado,
-                        retiradanobalcao, retirabalcaodepois, paraviagem,
-                        numeropessoas, desconto, obs,
-                        data, horaabertura, horaultimoconsumo,
-                        currenttimemillis, timestampalteracao,
-                        statusagendamento, pautaunica
-                    ) VALUES (
-                        %s,%s,%s,%s,
-                        %s,%s,%s,%s,
-                        %s,%s,%s,
-                        %s,%s,%s,
-                        %s,%s,
-                        %s,%s,%s,
-                        %s,%s,%s,
-                        %s,%s,%s,
-                        %s,%s,%s,
-                        %s,%s,%s,
-                        %s,%s,%s,
-                        %s,%s,%s,
-                        %s,%s,%s,
-                        %s,%s,
-                        %s,%s
-                    ) RETURNING id
-                """
-                mesa_values = (
-                    int(contamesa.get("tipopedido") or 0),
-                    int(contamesa.get("status") or 1),
-                    int(contamesa.get("situacao") or 0),
-                    numeromesa,
-                    int(contamesa.get("idfilial") or 1),
-                    int(contamesa.get("idusuario") or 1),
-                    int(contamesa.get("idcliente") or 0),
-                    str(contamesa.get("codigocliente") or "")[:14],
-                    str(contamesa.get("nomecliente") or "Cliente")[:60],
-                    str(contamesa.get("telefone") or "")[:20],
-                    str(contamesa.get("documento") or "")[:18],
-                    str(contamesa.get("endereco") or "")[:60],
-                    str(contamesa.get("endereconumero") or "")[:12],
-                    str(contamesa.get("enderecobairro") or "")[:255],
-                    str(contamesa.get("enderecocomplemento") or "")[:255],
-                    str(contamesa.get("enderecoreferencia") or "")[:255],
-                    float(contamesa.get("valorentrega") or 0),
-                    float(contamesa.get("valortotal") or 0),
-                    float(contamesa.get("valorcombinado") or contamesa.get("valortotal") or 0),
-                    float(contamesa.get("valordinheiro") or 0),
-                    float(contamesa.get("valorcartao") or 0),
-                    float(contamesa.get("valorpix") or 0),
-                    float(contamesa.get("valorcarteiradigital") or 0),
-                    float(contamesa.get("valoroutros") or 0),
-                    float(contamesa.get("valorcheque") or 0),
-                    int(contamesa.get("tipointegracao") or 0),
-                    str(contamesa.get("nomeintegracao") or "")[:64],
-                    protocol_key,
-                    hash_val,
-                    int(contamesa.get("statussinc") or 1),
-                    int(contamesa.get("cupomcancelado") or 0),
-                    int(contamesa.get("retiradanobalcao") or 0),
-                    int(contamesa.get("retirabalcaodepois") or 0),
-                    int(contamesa.get("paraviagem") or 0),
-                    int(contamesa.get("numeropessoas") or 1),
-                    float(contamesa.get("desconto") or 0),
-                    str(contamesa.get("obs") or "")[:255],
-                    contamesa.get("data") or now.date().isoformat(),
-                    contamesa.get("horaabertura") or now.isoformat(),
-                    contamesa.get("horaultimoconsumo") or now.isoformat(),
-                    int(contamesa.get("currenttimemillis") or int(now.timestamp() * 1000)),
-                    int(contamesa.get("timestampalteracao") or int(now.timestamp() * 1000)),
-                    int(contamesa.get("statusagendamento") or 3),
-                    int(
-                        contamesa.get("pautaunica")
-                        if contamesa.get("pautaunica") is not None
-                        else 1
-                    ),
+                cols = _table_columns(cur, mesa_table)
+                include_optional = (
+                    "statusagendamento" in cols and "pautaunica" in cols
                 )
-                try:
-                    cur.execute(insert_mesa, mesa_values)
-                    conta_id = int(cur.fetchone()["id"])
-                except IntegrityError:
-                    reused = _existing_by_protocol(cur, mesa_table, protocol_key, summary)
-                    if reused:
-                        return reused
-                    raise
+                if not include_optional:
+                    logger.warning(
+                        "UniPlus: colunas statusagendamento/pautaunica ausentes em %s — "
+                        "INSERT sem elas (compatibilidade)",
+                        mesa_table,
+                    )
+
+                hash_val = _pad_hash(str(contamesa.get("hash") or ""))
+                conta_id = None
+                numeromesa = None
+                last_exc = None
+
+                for attempt in range(5):
+                    cur.execute("SAVEPOINT uniplus_ins")
+                    # Após colisão, usa MAX global para não repetir número ocupado
+                    numeromesa = _next_numeromesa(
+                        cur, mesa_table, open_delivery_only=(attempt == 0)
+                    )
+                    try:
+                        conta_id = _insert_contamesa(
+                            cur,
+                            mesa_table,
+                            contamesa,
+                            protocol_key,
+                            numeromesa,
+                            hash_val,
+                            now,
+                            include_optional=include_optional,
+                        )
+                        cur.execute("RELEASE SAVEPOINT uniplus_ins")
+                        last_exc = None
+                        break
+                    except Exception as exc:
+                        cur.execute("ROLLBACK TO SAVEPOINT uniplus_ins")
+
+                        # Schema sem colunas opcionais (se detection falhou)
+                        if include_optional and _is_undefined_column_error(exc):
+                            logger.warning(
+                                "UniPlus: INSERT falhou por coluna ausente (%s). "
+                                "Retentando sem statusagendamento/pautaunica.",
+                                exc,
+                            )
+                            include_optional = False
+                            cur.execute("SAVEPOINT uniplus_ins")
+                            try:
+                                conta_id = _insert_contamesa(
+                                    cur,
+                                    mesa_table,
+                                    contamesa,
+                                    protocol_key,
+                                    numeromesa,
+                                    hash_val,
+                                    now,
+                                    include_optional=False,
+                                )
+                                cur.execute("RELEASE SAVEPOINT uniplus_ins")
+                                last_exc = None
+                                break
+                            except Exception as exc2:
+                                cur.execute("ROLLBACK TO SAVEPOINT uniplus_ins")
+                                last_exc = exc2
+                                if isinstance(exc2, IntegrityError):
+                                    reused = _existing_by_protocol(
+                                        cur, mesa_table, protocol_key, summary
+                                    )
+                                    if reused:
+                                        return reused
+                                    continue
+                                raise
+
+                        if isinstance(exc, IntegrityError):
+                            reused = _existing_by_protocol(
+                                cur, mesa_table, protocol_key, summary
+                            )
+                            if reused:
+                                return reused
+                            last_exc = exc
+                            logger.warning(
+                                "UniPlus IntegrityError na tentativa %s mesa=%s protocol=%s: %s",
+                                attempt + 1,
+                                numeromesa,
+                                protocol_key,
+                                exc,
+                            )
+                            continue
+                        raise
+
+                if conta_id is None:
+                    raise last_exc or RuntimeError(
+                        "ERR_UNIPLUS_INSERT: falha ao inserir CONTAMESA"
+                    )
 
                 inserted_items = []
                 for item in itens:

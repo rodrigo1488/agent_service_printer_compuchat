@@ -274,16 +274,49 @@ def _handle_print_job(ws, job_id: int, conteudo: dict, printer_config: dict):
         elif not success and protocol:
             message = f"{message} protocol={protocol}"
 
+        # Detalhe específico de PRINT (não misturar com layout UniPlus na UI de logs)
+        customer = (receipt or {}).get("customer") or {}
+        items_flat = []
+        for grupo, items in ((receipt or {}).get("items_by_group") or {}).items():
+            for it in items or []:
+                items_flat.append(
+                    {
+                        "grupo": grupo,
+                        "nome": it.get("name"),
+                        "qtd": it.get("quantity"),
+                        "total": it.get("total"),
+                    }
+                )
+        print_detail = {
+            "kind": "print",
+            "protocol": protocol or None,
+            "formResponseId": (conteudo or {}).get("formResponseId")
+            or (conteudo or {}).get("form_response_id"),
+            "formName": (receipt or {}).get("form_name"),
+            "cliente": customer.get("name") or None,
+            "telefone": customer.get("phone") or None,
+            "email": customer.get("email") or None,
+            "tableNumber": (receipt or {}).get("table_number") or None,
+            "garcomName": (receipt or {}).get("garcom_name") or None,
+            "valortotal": (receipt or {}).get("total"),
+            "valorentrega": (receipt or {}).get("delivery_fee"),
+            "subtotal": (receipt or {}).get("subtotal"),
+            "itens_count": len(items_flat),
+            "itens": items_flat[:40],
+            "device_id": device_id,
+            "connection_type": connection_type,
+            "printer_ip": printer_ip if connection_type == "network" else None,
+            "printer_name_local": latest_config.get("printer_name_local")
+            if connection_type == "local"
+            else None,
+        }
+
         db.add_print_log(
             job_id,
             status,
             message,
             kind="print",
-            detail={
-                "protocol": protocol or None,
-                "device_id": device_id,
-                "connection_type": connection_type,
-            },
+            detail=print_detail,
         )
         ack = {"event": "ack", "job_id": job_id, "status": status}
         if message:
