@@ -154,9 +154,12 @@ def _resolve_produto_id(
     cur, cfg: Dict[str, str], codigo: str, nome: str = ""
 ) -> Tuple[int, str]:
     """
-    Resolve id do produto UniPlus.
-    Retorna (idproduto, codigo_usado).
-    Tenta codigo exato; se falhar/ausente, match por nome.
+    Resolve id do produto UniPlus a partir do campo visível `codigo`.
+
+    Ordem:
+    1) Match exato em produto.codigo (campo visível ao usuário)
+    2) Se o valor bater no id interno, erro orientando a usar o codigo
+    3) Fallback por nome (último recurso)
     """
     table = cfg["produto_table"]
     codigo_col = cfg["produto_codigo_column"]
@@ -166,14 +169,32 @@ def _resolve_produto_id(
 
     if codigo:
         cur.execute(
-            f"SELECT {id_col} AS id, {codigo_col} AS codigo FROM {table} WHERE {codigo_col} = %s LIMIT 1",
+            f"SELECT {id_col} AS id, {codigo_col} AS codigo FROM {table} WHERE CAST({codigo_col} AS text) = %s LIMIT 1",
             (codigo,),
         )
         row = cur.fetchone()
         if row:
             rid = int(row["id"] if isinstance(row, dict) else row[0])
-            rc = str(row["codigo"] if isinstance(row, dict) else row[1])
+            rc = str(row["codigo"] if isinstance(row, dict) else row[1]).strip()
             return rid, rc
+
+        # Valor parece ser o id interno (ex.: 177) em vez do codigo visível (ex.: 1080)
+        if codigo.isdigit():
+            cur.execute(
+                f"SELECT {id_col} AS id, {codigo_col} AS codigo FROM {table} WHERE {id_col} = %s LIMIT 1",
+                (int(codigo),),
+            )
+            by_id = cur.fetchone()
+            if by_id:
+                rid = int(by_id["id"] if isinstance(by_id, dict) else by_id[0])
+                rc = str(
+                    by_id["codigo"] if isinstance(by_id, dict) else by_id[1]
+                ).strip()
+                raise UniplusPermanentError(
+                    "ERR_UNIPLUS_USE_CODIGO_NOT_ID: "
+                    f"informado id interno={rid}; use o codigo visível={rc or '-'} "
+                    "(campo codigo do cadastro UniPlus)"
+                )
 
     needle = _normalize_nome(nome)
     nome_col = _produto_nome_column(cur, table) if needle else ""
@@ -184,7 +205,7 @@ def _resolve_produto_id(
                 f"""
                 SELECT {id_col} AS id, {codigo_col} AS codigo, {nome_col} AS nome
                 FROM {table}
-                WHERE lower({nome_col}) LIKE %s
+                WHERE lower(CAST({nome_col} AS text)) LIKE %s
                 LIMIT 50
                 """,
                 (f"%{token}%",),
@@ -195,11 +216,11 @@ def _resolve_produto_id(
             for row in rows:
                 if isinstance(row, dict):
                     rid = int(row["id"])
-                    rc = str(row.get("codigo") or "")
+                    rc = str(row.get("codigo") or "").strip()
                     rnome = str(row.get("nome") or "")
                 else:
                     rid = int(row[0])
-                    rc = str(row[1] or "")
+                    rc = str(row[1] or "").strip()
                     rnome = str(row[2] or "")
                 pname = _normalize_nome(rnome)
                 if not pname:
@@ -212,7 +233,8 @@ def _resolve_produto_id(
                 return best
 
     raise UniplusPermanentError(
-        f"ERR_UNIPLUS_PRODUCT_NOT_FOUND: codigo={codigo or '-'} nome={nome or '-'}"
+        f"ERR_UNIPLUS_PRODUCT_NOT_FOUND: codigo={codigo or '-'} nome={nome or '-'} "
+        "(valide o campo codigo do UniPlus, não o id interno)"
     )
 
 
@@ -625,9 +647,10 @@ def handle_uniplus_job(db_module, conteudo: Dict[str, Any]) -> Dict[str, Any]:
                 for item in itens:
                     codigo = str(item.get("codigoproduto") or "").strip()
                     nome = str(item.get("nomeproduto") or "")[:120]
-                    if not codigo and not nome:
+                    if not codigo:
                         raise UniplusPermanentError(
-                            "ERR_UNIPLUS_PAYLOAD: Item sem codigoproduto/nomeproduto"
+                            "ERR_UNIPLUS_PAYLOAD: Item sem codigoproduto "
+                            "(informe produto.codigo do UniPlus, não o id interno)"
                         )
                     idproduto, codigo_resolvido = _resolve_produto_id(
                         cur, cfg, codigo, nome

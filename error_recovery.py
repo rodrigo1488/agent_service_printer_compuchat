@@ -296,8 +296,11 @@ class DataValidator:
                 return False, f"ERR_UNIPLUS_PAYLOAD: item[{idx}] inválido"
             codigo = str(item.get("codigoproduto") or "").strip()
             nome = str(item.get("nomeproduto") or "").strip()
-            if not codigo and not nome:
-                return False, f"ERR_UNIPLUS_PAYLOAD: item[{idx}] sem codigoproduto/nomeproduto"
+            if not codigo:
+                return False, f"ERR_UNIPLUS_PAYLOAD: item[{idx}] sem codigoproduto (use produto.codigo do UniPlus)"
+            if not nome:
+                # nome ajuda no diagnóstico; não bloqueia se codigo veio
+                pass
             try:
                 qty = float(item.get("quantidade") or 1)
                 total = float(item.get("valortotal") or 0)
