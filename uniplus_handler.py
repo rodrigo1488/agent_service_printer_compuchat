@@ -657,6 +657,9 @@ def handle_uniplus_job(db_module, conteudo: Dict[str, Any]) -> Dict[str, Any]:
                         "ERR_UNIPLUS_INSERT: falha ao inserir CONTAMESA"
                     )
 
+                item_cols = _table_columns(cur, item_table)
+                item_has_hash = "hash" in item_cols
+
                 inserted_items = []
                 for item in itens:
                     codigo = str(item.get("codigoproduto") or "").strip()
@@ -676,40 +679,79 @@ def handle_uniplus_job(db_module, conteudo: Dict[str, Any]) -> Dict[str, Any]:
                     qty = float(item.get("quantidade") or 1)
                     precounitario = float(item.get("precounitario") or 0)
                     valortotal = float(item.get("valortotal") or (precounitario * qty))
-                    cur.execute(
-                        f"""
-                        INSERT INTO {item_table} (
-                            idcontamesa, idproduto, quantidade, precounitario, valortotal,
-                            cancelado, observacao, codigoproduto, nomeproduto, unidademedida,
-                            orderidintegracao, tipointegracao, confirmado,
-                            data, horaabertura, datahoralancamento, currenttimemillis,
-                            numeroconta, decimaisquantidade, decimaispreco
-                        ) VALUES (
-                            %s,%s,%s,%s,%s,
-                            0,%s,%s,%s,%s,
-                            %s,0,1,
-                            %s,%s,%s,%s,
-                            %s,0,2
+                    # contamesitem_uk1 UNIQUE(hash) — hash vazio/espaço colide no Unichef
+                    item_hash = _pad_hash(str(item.get("hash") or ""))
+                    if item_has_hash:
+                        cur.execute(
+                            f"""
+                            INSERT INTO {item_table} (
+                                idcontamesa, idproduto, quantidade, precounitario, valortotal,
+                                cancelado, observacao, codigoproduto, nomeproduto, unidademedida,
+                                orderidintegracao, tipointegracao, confirmado, hash,
+                                data, horaabertura, datahoralancamento, currenttimemillis,
+                                numeroconta, decimaisquantidade, decimaispreco
+                            ) VALUES (
+                                %s,%s,%s,%s,%s,
+                                0,%s,%s,%s,%s,
+                                %s,0,1,%s,
+                                %s,%s,%s,%s,
+                                %s,0,2
+                            )
+                            """,
+                            (
+                                conta_id,
+                                idproduto,
+                                qty,
+                                precounitario,
+                                valortotal,
+                                str(item.get("observacao") or "")[:255],
+                                codigo[:20],
+                                nome,
+                                str(item.get("unidademedida") or "UN")[:6],
+                                protocol_key,
+                                item_hash,
+                                contamesa.get("data") or now.date().isoformat(),
+                                contamesa.get("horaabertura") or now.isoformat(),
+                                now.isoformat(),
+                                int(now.timestamp() * 1000),
+                                numeromesa,
+                            ),
                         )
-                        """,
-                        (
-                            conta_id,
-                            idproduto,
-                            qty,
-                            precounitario,
-                            valortotal,
-                            str(item.get("observacao") or "")[:255],
-                            codigo[:20],
-                            nome,
-                            str(item.get("unidademedida") or "UN")[:6],
-                            protocol_key,
-                            contamesa.get("data") or now.date().isoformat(),
-                            contamesa.get("horaabertura") or now.isoformat(),
-                            now.isoformat(),
-                            int(now.timestamp() * 1000),
-                            numeromesa,
-                        ),
-                    )
+                    else:
+                        cur.execute(
+                            f"""
+                            INSERT INTO {item_table} (
+                                idcontamesa, idproduto, quantidade, precounitario, valortotal,
+                                cancelado, observacao, codigoproduto, nomeproduto, unidademedida,
+                                orderidintegracao, tipointegracao, confirmado,
+                                data, horaabertura, datahoralancamento, currenttimemillis,
+                                numeroconta, decimaisquantidade, decimaispreco
+                            ) VALUES (
+                                %s,%s,%s,%s,%s,
+                                0,%s,%s,%s,%s,
+                                %s,0,1,
+                                %s,%s,%s,%s,
+                                %s,0,2
+                            )
+                            """,
+                            (
+                                conta_id,
+                                idproduto,
+                                qty,
+                                precounitario,
+                                valortotal,
+                                str(item.get("observacao") or "")[:255],
+                                codigo[:20],
+                                nome,
+                                str(item.get("unidademedida") or "UN")[:6],
+                                protocol_key,
+                                contamesa.get("data") or now.date().isoformat(),
+                                contamesa.get("horaabertura") or now.isoformat(),
+                                now.isoformat(),
+                                int(now.timestamp() * 1000),
+                                numeromesa,
+                            ),
+                        )
                     inserted_items.append(
                         {
                             "codigo": codigo[:20],
@@ -718,6 +760,7 @@ def handle_uniplus_job(db_module, conteudo: Dict[str, Any]) -> Dict[str, Any]:
                             "qtd": qty,
                             "precounitario": precounitario,
                             "total": valortotal,
+                            "hash": item_hash if item_has_hash else None,
                         }
                     )
 
