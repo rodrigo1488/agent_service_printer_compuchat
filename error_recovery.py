@@ -295,8 +295,9 @@ class DataValidator:
             if not isinstance(item, dict):
                 return False, f"ERR_UNIPLUS_PAYLOAD: item[{idx}] inválido"
             codigo = str(item.get("codigoproduto") or "").strip()
-            if not codigo:
-                return False, f"ERR_UNIPLUS_PAYLOAD: item[{idx}] sem codigoproduto"
+            nome = str(item.get("nomeproduto") or "").strip()
+            if not codigo and not nome:
+                return False, f"ERR_UNIPLUS_PAYLOAD: item[{idx}] sem codigoproduto/nomeproduto"
             try:
                 qty = float(item.get("quantidade") or 1)
                 total = float(item.get("valortotal") or 0)

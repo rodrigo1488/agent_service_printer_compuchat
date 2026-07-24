@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import re
+import unicodedata
 from datetime import datetime, timezone
 from typing import Any, Dict, Tuple
 
@@ -117,20 +118,102 @@ def _connect(dsn: str):
     return conn
 
 
-def _resolve_produto_id(cur, cfg: Dict[str, str], codigo: str) -> int:
+def _normalize_nome(nome: str) -> str:
+    s = unicodedata.normalize("NFD", str(nome or ""))
+    s = "".join(ch for ch in s if unicodedata.category(ch) != "Mn")
+    s = s.lower()
+    s = re.sub(r"\b\d+\s*ml\b", " ", s)
+    s = re.sub(r"\b\d+\s*l\b", " ", s)
+    s = re.sub(r"[^a-z0-9]+", " ", s)
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def _produto_nome_column(cur, table: str) -> str:
+    """Detecta coluna de nome no cadastro de produto."""
+    cur.execute(
+        """
+        SELECT lower(column_name) AS col
+        FROM information_schema.columns
+        WHERE lower(table_name) = lower(%s)
+          AND table_schema = current_schema()
+          AND lower(column_name) IN ('nome', 'descricao', 'produto', 'nomefantasia')
+        """,
+        (table,),
+    )
+    rows = cur.fetchall() or []
+    cols = set()
+    for row in rows:
+        cols.add(str(row["col"] if isinstance(row, dict) else row[0]).lower())
+    for preferred in ("nome", "descricao", "produto", "nomefantasia"):
+        if preferred in cols:
+            return preferred
+    return ""
+
+
+def _resolve_produto_id(
+    cur, cfg: Dict[str, str], codigo: str, nome: str = ""
+) -> Tuple[int, str]:
+    """
+    Resolve id do produto UniPlus.
+    Retorna (idproduto, codigo_usado).
+    Tenta codigo exato; se falhar/ausente, match por nome.
+    """
     table = cfg["produto_table"]
     codigo_col = cfg["produto_codigo_column"]
     id_col = cfg["produto_id_column"]
-    cur.execute(
-        f"SELECT {id_col} AS id FROM {table} WHERE {codigo_col} = %s LIMIT 1",
-        (codigo,),
-    )
-    row = cur.fetchone()
-    if not row:
-        raise UniplusPermanentError(
-            f"ERR_UNIPLUS_PRODUCT_NOT_FOUND: codigo={codigo}"
+    codigo = str(codigo or "").strip()
+    nome = str(nome or "").strip()
+
+    if codigo:
+        cur.execute(
+            f"SELECT {id_col} AS id, {codigo_col} AS codigo FROM {table} WHERE {codigo_col} = %s LIMIT 1",
+            (codigo,),
         )
-    return int(row["id"] if isinstance(row, dict) else row[0])
+        row = cur.fetchone()
+        if row:
+            rid = int(row["id"] if isinstance(row, dict) else row[0])
+            rc = str(row["codigo"] if isinstance(row, dict) else row[1])
+            return rid, rc
+
+    needle = _normalize_nome(nome)
+    nome_col = _produto_nome_column(cur, table) if needle else ""
+    if needle and nome_col:
+        token = needle.split(" ")[0]
+        if len(token) >= 3:
+            cur.execute(
+                f"""
+                SELECT {id_col} AS id, {codigo_col} AS codigo, {nome_col} AS nome
+                FROM {table}
+                WHERE lower({nome_col}) LIKE %s
+                LIMIT 50
+                """,
+                (f"%{token}%",),
+            )
+            rows = cur.fetchall() or []
+            best = None
+            best_len = -1
+            for row in rows:
+                if isinstance(row, dict):
+                    rid = int(row["id"])
+                    rc = str(row.get("codigo") or "")
+                    rnome = str(row.get("nome") or "")
+                else:
+                    rid = int(row[0])
+                    rc = str(row[1] or "")
+                    rnome = str(row[2] or "")
+                pname = _normalize_nome(rnome)
+                if not pname:
+                    continue
+                if needle == pname or needle in pname or pname in needle:
+                    if len(pname) > best_len:
+                        best = (rid, rc or codigo or token)
+                        best_len = len(pname)
+            if best:
+                return best
+
+    raise UniplusPermanentError(
+        f"ERR_UNIPLUS_PRODUCT_NOT_FOUND: codigo={codigo or '-'} nome={nome or '-'}"
+    )
 
 
 def _summarize_payload(
@@ -541,15 +624,18 @@ def handle_uniplus_job(db_module, conteudo: Dict[str, Any]) -> Dict[str, Any]:
                 inserted_items = []
                 for item in itens:
                     codigo = str(item.get("codigoproduto") or "").strip()
-                    if not codigo:
+                    nome = str(item.get("nomeproduto") or "")[:120]
+                    if not codigo and not nome:
                         raise UniplusPermanentError(
-                            "ERR_UNIPLUS_PAYLOAD: Item sem codigoproduto"
+                            "ERR_UNIPLUS_PAYLOAD: Item sem codigoproduto/nomeproduto"
                         )
-                    idproduto = _resolve_produto_id(cur, cfg, codigo)
+                    idproduto, codigo_resolvido = _resolve_produto_id(
+                        cur, cfg, codigo, nome
+                    )
+                    codigo = str(codigo_resolvido or codigo).strip()
                     qty = float(item.get("quantidade") or 1)
                     precounitario = float(item.get("precounitario") or 0)
                     valortotal = float(item.get("valortotal") or (precounitario * qty))
-                    nome = str(item.get("nomeproduto") or "")[:120]
                     cur.execute(
                         f"""
                         INSERT INTO {item_table} (
