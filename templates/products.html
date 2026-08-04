@@ -16,11 +16,28 @@
     <div class="alert alert-error">Ative o UniPlus em Configuração → UniPlus para listar produtos.</div>
     {% else %}
 
-    <form method="get" action="{{ url_for('products_page') }}" style="display:flex; gap:0.6rem; margin-bottom:1rem; flex-wrap:wrap;">
+    <form method="get" action="{{ url_for('products_page') }}" style="display:flex; gap:0.6rem; margin-bottom:0.75rem; flex-wrap:wrap;">
         <input type="search" name="q" value="{{ q or '' }}" placeholder="Buscar código ou nome…" style="flex:1; min-width:200px; padding:0.55rem 0.75rem; border:1px solid var(--line); border-radius:10px;">
         <button type="submit" class="btn">Buscar</button>
         <a class="btn btn-secondary" href="{{ url_for('products_page') }}">Limpar</a>
     </form>
+
+    <div style="display:flex; gap:0.6rem; margin-bottom:1rem; flex-wrap:wrap; align-items:center;">
+        <form method="post" action="{{ url_for('products_enable_all') }}" style="margin:0;"
+              onsubmit="return confirm('Adicionar (sync ON) e enviar ao Compuchat todos os produtos listados{% if q %} do filtro atual{% endif %}? Isso pode levar alguns minutos.');">
+            <input type="hidden" name="q" value="{{ q or '' }}">
+            <button type="submit" class="btn">Adicionar todos</button>
+        </form>
+        <form method="post" action="{{ url_for('products_sync_all') }}" style="margin:0;"
+              onsubmit="return confirm('Sincronizar agora todos os produtos com sync automático ON{% if q %} (filtro atual){% endif %}?');">
+            <input type="hidden" name="q" value="{{ q or '' }}">
+            <button type="submit" class="btn btn-secondary">Sincronizar todos</button>
+        </form>
+        <span style="color:var(--muted); font-size:0.82rem;">
+            Adicionar = liga sync + upsert · Sincronizar = força upsert dos já marcados
+            {% if q %} · filtro “{{ q }}”{% endif %}
+        </span>
+    </div>
 
     <div style="overflow:auto;">
         <table class="table" style="width:100%; border-collapse:collapse; font-size:0.9rem;">

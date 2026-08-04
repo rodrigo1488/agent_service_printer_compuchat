@@ -431,6 +431,71 @@ def products_sync_now():
     )
 
 
+def _bulk_result_message(action_label: str, result: dict) -> tuple:
+    synced = int(result.get("synced") or 0)
+    failed = int(result.get("failed") or 0)
+    total = int(result.get("total") or result.get("enabled") or 0)
+    custom = (result.get("message") or "").strip()
+    if custom and synced == 0 and failed == 0:
+        return custom, "success"
+    errors = result.get("errors") or []
+    detail = f" — {errors[0]}" if errors else ""
+    if failed:
+        return (
+            f"{action_label}: {synced}/{total} ok, {failed} falha(s){detail}",
+            "error",
+        )
+    return f"{action_label}: {synced}/{total} ok{detail}", "success"
+
+
+@app.route("/products/enable-all", methods=["POST"])
+def products_enable_all():
+    """Adiciona (sync ON) + upsert de todos os produtos listados (respeita filtro q)."""
+    import product_sync
+
+    q = (request.form.get("q") or "").strip()
+    try:
+        result = product_sync.enable_all_products(q=q, limit=2000)
+        if result.get("message") and not int(result.get("synced") or 0):
+            msg, mtype = result["message"], "success"
+        else:
+            enabled = int(result.get("enabled") or 0)
+            synced = int(result.get("synced") or 0)
+            failed = int(result.get("failed") or 0)
+            msg = f"Adicionar todos: {enabled} marcados, {synced} sincronizados"
+            if failed:
+                msg += f", {failed} falha(s)"
+                errors = result.get("errors") or []
+                if errors:
+                    msg += f" — {errors[0]}"
+                mtype = "error"
+            else:
+                mtype = "success"
+    except Exception as e:
+        msg = str(e)
+        mtype = "error"
+    return redirect(
+        url_for("products_page", q=q, message=msg, message_type=mtype)
+    )
+
+
+@app.route("/products/sync-all", methods=["POST"])
+def products_sync_all():
+    """Força sync de todos os produtos com sync automático ON (respeita filtro q)."""
+    import product_sync
+
+    q = (request.form.get("q") or "").strip()
+    try:
+        result = product_sync.sync_all_products(q=q, limit=2000)
+        msg, mtype = _bulk_result_message("Sincronizar todos", result)
+    except Exception as e:
+        msg = str(e)
+        mtype = "error"
+    return redirect(
+        url_for("products_page", q=q, message=msg, message_type=mtype)
+    )
+
+
 @app.route("/api/logs")
 def api_logs():
     """API JSON para auto-refresh da tela de logs."""

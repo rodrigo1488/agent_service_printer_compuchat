@@ -20,6 +20,7 @@ from uniplus_handler import (
 logger = logging.getLogger("product_sync")
 
 POLL_INTERVAL_SEC = 30
+UPSERT_CHUNK_SIZE = 100
 _sync_thread: Optional[threading.Thread] = None
 _should_stop = False
 _lock = threading.Lock()
@@ -288,7 +289,9 @@ def fetch_uniplus_product(codigo: str) -> Optional[Dict[str, Any]]:
         conn.close()
 
 
-def upsert_to_compuchat(products: List[Dict[str, Any]]) -> Dict[str, Any]:
+def upsert_to_compuchat(
+    products: List[Dict[str, Any]], *, timeout: int = 30
+) -> Dict[str, Any]:
     device_id, token = _device_auth()
     if not device_id or not token:
         raise RuntimeError("Configure device_id e token de uma impressora no PrintAgent")
@@ -319,7 +322,7 @@ def upsert_to_compuchat(products: List[Dict[str, Any]]) -> Dict[str, Any]:
         },
     )
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        with urllib.request.urlopen(req, timeout=max(15, int(timeout))) as resp:
             raw = resp.read().decode("utf-8")
             return json.loads(raw) if raw else {"results": []}
     except urllib.error.HTTPError as e:
@@ -331,6 +334,177 @@ def upsert_to_compuchat(products: List[Dict[str, Any]]) -> Dict[str, Any]:
                 f"URL={url}"
             ) from e
         raise RuntimeError(f"HTTP {e.code}: {detail}") from e
+
+
+def _upsert_chunk_and_update_local(
+    products: List[Dict[str, Any]],
+) -> Tuple[int, int, List[str]]:
+    """Envia lote ao Compuchat e atualiza SQLite. Retorna (ok, fail, erros_amostra)."""
+    if not products:
+        return 0, 0, []
+    ok = 0
+    fail = 0
+    errors: List[str] = []
+    timeout = min(120, 20 + len(products) * 2)
+    try:
+        data = upsert_to_compuchat(products, timeout=timeout)
+        by_code = {
+            str(r.get("codigo") or "").strip(): r for r in (data.get("results") or [])
+        }
+        for p in products:
+            codigo = str(p.get("codigo") or "").strip()
+            result = by_code.get(codigo) or {}
+            if result.get("error"):
+                fail += 1
+                err = str(result["error"])
+                db.update_sync_product_state(
+                    codigo,
+                    nome=p.get("nome") or "",
+                    preco=float(p.get("preco") or 0),
+                    last_error=err,
+                )
+                if len(errors) < 5:
+                    errors.append(f"{codigo}: {err}")
+            else:
+                ok += 1
+                db.update_sync_product_state(
+                    codigo,
+                    nome=p.get("nome") or "",
+                    preco=float(p.get("preco") or 0),
+                    fingerprint=p.get("fingerprint") or make_fingerprint(
+                        p.get("nome") or "", float(p.get("preco") or 0), p.get("dataalteracao")
+                    ),
+                    last_error="",
+                    synced=True,
+                )
+    except Exception as e:
+        err = str(e)
+        fail = len(products)
+        for p in products:
+            db.update_sync_product_state(
+                str(p.get("codigo") or "").strip(), last_error=err
+            )
+        errors.append(err)
+    return ok, fail, errors
+
+
+def upsert_many(products: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Upsert em chunks de até 100 (limite do backend Compuchat)."""
+    total_ok = 0
+    total_fail = 0
+    errors: List[str] = []
+    for i in range(0, len(products), UPSERT_CHUNK_SIZE):
+        chunk = products[i : i + UPSERT_CHUNK_SIZE]
+        ok, fail, chunk_errors = _upsert_chunk_and_update_local(chunk)
+        total_ok += ok
+        total_fail += fail
+        for err in chunk_errors:
+            if len(errors) < 5:
+                errors.append(err)
+    return {
+        "ok": total_fail == 0,
+        "synced": total_ok,
+        "failed": total_fail,
+        "total": len(products),
+        "errors": errors,
+    }
+
+
+def enable_all_products(q: str = "", limit: int = 2000) -> Dict[str, Any]:
+    """Marca sync ON em todos os produtos listados (filtro q) e faz upsert imediato."""
+    if not is_uniplus_enabled(db):
+        raise RuntimeError("UniPlus desativado na configuração")
+    products = list_uniplus_products(q=q, limit=limit)
+    # Sync exige código válido (não placeholders)
+    products = [
+        p
+        for p in products
+        if str(p.get("codigo") or "").strip()
+        and not str(p.get("codigo") or "").startswith("?")
+    ]
+    if not products:
+        return {
+            "ok": True,
+            "enabled": 0,
+            "synced": 0,
+            "failed": 0,
+            "total": 0,
+            "errors": [],
+            "message": "Nenhum produto para adicionar",
+        }
+
+    for p in products:
+        db.set_sync_product_enabled(
+            p["codigo"],
+            True,
+            nome=p.get("nome") or "",
+            preco=float(p.get("preco") or 0),
+        )
+
+    result = upsert_many(products)
+    result["enabled"] = len(products)
+    return result
+
+
+def sync_all_products(q: str = "", limit: int = 2000) -> Dict[str, Any]:
+    """
+    Força sync de todos os produtos com sync automático ON.
+    Se q for informado, restringe aos códigos que batem com a busca UniPlus atual.
+    """
+    if not is_uniplus_enabled(db):
+        raise RuntimeError("UniPlus desativado na configuração")
+
+    enabled = db.list_sync_products(enabled_only=True)
+    if not enabled:
+        return {
+            "ok": True,
+            "synced": 0,
+            "failed": 0,
+            "total": 0,
+            "errors": [],
+            "message": "Nenhum produto em sync automático",
+        }
+
+    if q:
+        listed = {
+            str(p.get("codigo") or "").strip()
+            for p in list_uniplus_products(q=q, limit=limit)
+        }
+        enabled = [item for item in enabled if item["codigo"] in listed]
+
+    if not enabled:
+        return {
+            "ok": True,
+            "synced": 0,
+            "failed": 0,
+            "total": 0,
+            "errors": [],
+            "message": "Nenhum produto em sync automático no filtro atual",
+        }
+
+    remotes: List[Dict[str, Any]] = []
+    missing = 0
+    for item in enabled:
+        codigo = item["codigo"]
+        remote = fetch_uniplus_product(codigo)
+        if not remote:
+            missing += 1
+            db.update_sync_product_state(
+                codigo, last_error="produto não encontrado no UniPlus"
+            )
+            continue
+        remotes.append(remote)
+
+    result = upsert_many(remotes)
+    result["failed"] = int(result.get("failed") or 0) + missing
+    result["total"] = len(enabled)
+    result["missing"] = missing
+    if missing and len(result.get("errors") or []) < 5:
+        result.setdefault("errors", []).append(
+            f"{missing} produto(s) não encontrado(s) no UniPlus"
+        )
+    result["ok"] = int(result.get("failed") or 0) == 0
+    return result
 
 
 def sync_one(codigo: str, force: bool = False) -> Dict[str, Any]:
