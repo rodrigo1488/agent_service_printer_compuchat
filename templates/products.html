@@ -1,12 +1,58 @@
 {% extends "base.html" %}
 {% block title %}Produtos UniPlus — Print Agent{% endblock %}
+{% block extra_css %}
+<style>
+    dialog#linkModal {
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        padding: 1.25rem;
+        max-width: 520px;
+        width: calc(100% - 2rem);
+        background: var(--surface);
+        color: inherit;
+    }
+    dialog#linkModal::backdrop { background: rgba(20, 33, 43, 0.45); }
+    .link-type-options {
+        display: flex;
+        flex-direction: column;
+        gap: 0.4rem;
+        margin-bottom: 1rem;
+        padding: 0.6rem 0.75rem;
+        background: #f7fafb;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+    }
+    .link-type-options label { display: flex; align-items: center; gap: 0.45rem; font-weight: 600; font-size: 0.88rem; margin-bottom: 0; }
+    .link-fieldset { display: flex; flex-direction: column; gap: 0.6rem; margin-bottom: 0.5rem; }
+    .status-banner {
+        font-size: 0.85rem;
+        color: var(--muted);
+        background: #f3f7f9;
+        border-radius: 8px;
+        padding: 0.5rem 0.7rem;
+        margin-bottom: 0.75rem;
+    }
+    tr.group-row td { background: #f3f7f9; font-weight: 600; }
+    .group-toggle-btn {
+        background: transparent;
+        border: none;
+        color: var(--ink);
+        font-size: 0.9rem;
+        cursor: pointer;
+        padding: 0.1rem 0.3rem;
+        margin-right: 0.3rem;
+    }
+    tr.group-child td:first-child { padding-left: 1.8rem; }
+    .preview-list { list-style: none; font-size: 0.8rem; color: var(--muted); margin-top: 0.2rem; max-height: 90px; overflow: auto; }
+</style>
+{% endblock %}
 {% block content %}
 <div class="panel">
     <h2 class="page-title">Produtos UniPlus</h2>
     <p class="page-sub">
-        Marque os produtos para sincronização automática com o Compuchat (nome + preço).
-        Use <strong>Variação…</strong> para anexar um código UniPlus como opção (ex. P/M/G) de um produto pai.
-        Chave: campo <strong>codigo</strong> (não o id interno).
+        Clique em <strong>Vincular…</strong> para ligar um código UniPlus a um produto do Compuchat — como produto
+        avulso novo, avulso já existente, ou variação (ex.: tamanho) de um produto pai. Códigos já anexados como
+        variação aparecem recolhidos abaixo do produto pai.
     </p>
 
     {% if message %}
@@ -18,7 +64,7 @@
     {% else %}
 
     <form method="get" action="{{ url_for('products_page') }}" style="display:flex; gap:0.6rem; margin-bottom:0.75rem; flex-wrap:wrap;">
-        <input type="search" name="q" value="{{ q or '' }}" placeholder="Buscar código ou nome…" style="flex:1; min-width:200px; padding:0.55rem 0.75rem; border:1px solid var(--line); border-radius:10px;">
+        <input type="search" name="q" id="searchQ" value="{{ q or '' }}" placeholder="Buscar código ou nome…" style="flex:1; min-width:200px; padding:0.55rem 0.75rem; border:1px solid var(--line); border-radius:10px;">
         <button type="submit" class="btn">Buscar</button>
         <a class="btn btn-secondary" href="{{ url_for('products_page') }}">Limpar</a>
     </form>
@@ -35,14 +81,15 @@
             <button type="submit" class="btn btn-secondary">Sincronizar todos</button>
         </form>
         <span style="color:var(--muted); font-size:0.82rem;">
-            Adicionar = liga sync + upsert · Sincronizar = força upsert dos já marcados
+            Bulk = sync rápido em lote (cai em grupo "Outros") · use <strong>Vincular…</strong> por item para
+            categoria correta ou variação
             {% if q %} · filtro “{{ q }}”{% endif %}
         </span>
     </div>
 
     {% if parents_error %}
     <div class="alert alert-error" style="margin-bottom:0.75rem;">
-        Não foi possível listar produtos Compuchat para variação: {{ parents_error }}
+        Não foi possível carregar produtos Compuchat para vínculo: {{ parents_error }}
     </div>
     {% endif %}
 
@@ -54,60 +101,108 @@
                     <th style="padding:0.5rem;">Código</th>
                     <th style="padding:0.5rem;">Nome</th>
                     <th style="padding:0.5rem;">Preço</th>
-                    <th style="padding:0.5rem;">Status</th>
+                    <th style="padding:0.5rem;">Vínculo</th>
                     <th style="padding:0.5rem;"></th>
                 </tr>
             </thead>
             <tbody>
-                {% for p in products %}
-                <tr style="border-bottom:1px solid var(--line);">
-                    <td style="padding:0.55rem;">
-                        <form method="post" action="{{ url_for('products_toggle') }}" style="margin:0;">
-                            <input type="hidden" name="codigo" value="{{ p.codigo }}">
-                            <input type="hidden" name="q" value="{{ q or '' }}">
-                            <label style="display:inline-flex; align-items:center; gap:0.35rem; cursor:pointer; font-weight:600;">
-                                <input type="checkbox" name="enabled" value="1" {% if p.sync_enabled %}checked{% endif %}
-                                       onchange="this.form.submit()">
-                                {% if p.sync_enabled %}ON{% else %}off{% endif %}
-                            </label>
-                        </form>
-                    </td>
-                    <td style="padding:0.55rem; font-family:ui-monospace, monospace;">{{ p.codigo }}</td>
-                    <td style="padding:0.55rem;">{{ p.nome }}{% if p.inativo %}<span style="color:var(--muted); font-size:0.75rem;"> (inativo)</span>{% endif %}</td>
-                    <td style="padding:0.55rem;">R$ {{ '%.2f'|format(p.preco|float) }}</td>
-                    <td style="padding:0.55rem; font-size:0.82rem;">
-                        {% if p.sync_enabled %}
-                            {% if p.last_error %}
-                                <span style="color:var(--danger);">{{ p.last_error[:80] }}</span>
-                            {% elif p.last_synced_at %}
-                                <span style="color:var(--ok);">OK {{ p.last_synced_at }}</span>
-                            {% else %}
-                                <span style="color:var(--warn);">pendente</span>
-                            {% endif %}
-                        {% else %}
-                            <span style="color:var(--muted);">—</span>
-                        {% endif %}
-                    </td>
-                    <td style="padding:0.55rem; white-space:nowrap;">
-                        <div style="display:flex; gap:0.35rem; flex-wrap:wrap;">
-                            {% if p.sync_enabled %}
-                            <form method="post" action="{{ url_for('products_sync_now') }}" style="margin:0;">
+                {% for row in display_rows %}
+                    {% if row.type == "group" %}
+                    <tr class="group-row" data-group-parent="{{ row.parent.id }}">
+                        <td colspan="6" style="padding:0.55rem;">
+                            <button type="button" class="group-toggle-btn js-group-toggle" data-group="{{ row.parent.id }}">▶</button>
+                            {{ row.parent.name }}
+                            {% if row.parent.grupo %}<span style="color:var(--muted); font-weight:400;"> · {{ row.parent.grupo }}</span>{% endif %}
+                            <span class="badge badge-ok" style="margin-left:0.4rem;">{{ row.children|length }} variação(ões)</span>
+                        </td>
+                    </tr>
+                    {% for p in row.children %}
+                    <tr class="group-child" data-group="{{ row.parent.id }}" style="display:none; border-bottom:1px solid var(--line);">
+                        <td style="padding:0.55rem;">
+                            <form method="post" action="{{ url_for('products_toggle') }}" style="margin:0;">
                                 <input type="hidden" name="codigo" value="{{ p.codigo }}">
                                 <input type="hidden" name="q" value="{{ q or '' }}">
-                                <button type="submit" class="btn btn-secondary" style="padding:0.3rem 0.6rem; font-size:0.8rem;">Sync agora</button>
+                                <label style="display:inline-flex; align-items:center; gap:0.35rem; cursor:pointer; font-weight:600;">
+                                    <input type="checkbox" name="enabled" value="1" {% if p.sync_enabled %}checked{% endif %}
+                                           onchange="this.form.submit()">
+                                    {% if p.sync_enabled %}ON{% else %}off{% endif %}
+                                </label>
                             </form>
+                        </td>
+                        <td style="padding:0.55rem; font-family:ui-monospace, monospace;">{{ p.codigo }}</td>
+                        <td style="padding:0.55rem;">{{ p.nome }}{% if p.inativo %}<span style="color:var(--muted); font-size:0.75rem;"> (inativo)</span>{% endif %}</td>
+                        <td style="padding:0.55rem;">R$ {{ '%.2f'|format(p.preco|float) }}</td>
+                        <td style="padding:0.55rem; font-size:0.82rem;">
+                            <span class="badge badge-ok">Opção: {{ p.link_status.optionLabel }}</span>
+                        </td>
+                        <td style="padding:0.55rem; white-space:nowrap;">
+                            <div style="display:flex; gap:0.35rem; flex-wrap:wrap;">
+                                {% if p.sync_enabled %}
+                                <form method="post" action="{{ url_for('products_sync_now') }}" style="margin:0;">
+                                    <input type="hidden" name="codigo" value="{{ p.codigo }}">
+                                    <input type="hidden" name="q" value="{{ q or '' }}">
+                                    <button type="submit" class="btn btn-secondary" style="padding:0.3rem 0.6rem; font-size:0.8rem;">Sync agora</button>
+                                </form>
+                                {% endif %}
+                                <button type="button" class="btn btn-secondary js-link-btn"
+                                        style="padding:0.3rem 0.6rem; font-size:0.8rem;"
+                                        data-codigo="{{ p.codigo }}"
+                                        data-nome="{{ p.nome }}"
+                                        data-preco="{{ '%.2f'|format(p.preco|float) }}"
+                                        data-suggested-label="{{ p.suggested_label or '' }}"
+                                        data-status='{{ p.link_status|tojson }}'>
+                                    Vincular…
+                                </button>
+                            </div>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                    {% else %}
+                    {% set p = row.item %}
+                    <tr style="border-bottom:1px solid var(--line);">
+                        <td style="padding:0.55rem;">
+                            <form method="post" action="{{ url_for('products_toggle') }}" style="margin:0;">
+                                <input type="hidden" name="codigo" value="{{ p.codigo }}">
+                                <input type="hidden" name="q" value="{{ q or '' }}">
+                                <label style="display:inline-flex; align-items:center; gap:0.35rem; cursor:pointer; font-weight:600;">
+                                    <input type="checkbox" name="enabled" value="1" {% if p.sync_enabled %}checked{% endif %}
+                                           onchange="this.form.submit()">
+                                    {% if p.sync_enabled %}ON{% else %}off{% endif %}
+                                </label>
+                            </form>
+                        </td>
+                        <td style="padding:0.55rem; font-family:ui-monospace, monospace;">{{ p.codigo }}</td>
+                        <td style="padding:0.55rem;">{{ p.nome }}{% if p.inativo %}<span style="color:var(--muted); font-size:0.75rem;"> (inativo)</span>{% endif %}</td>
+                        <td style="padding:0.55rem;">R$ {{ '%.2f'|format(p.preco|float) }}</td>
+                        <td style="padding:0.55rem; font-size:0.82rem;">
+                            {% if p.link_status.kind == "standalone" %}
+                            <span class="badge badge-ok">Avulso: {{ p.link_status.productName }}</span>
+                            {% else %}
+                            <span class="badge badge-muted">Não vinculado</span>
                             {% endif %}
-                            <button type="button" class="btn btn-secondary js-attach-var"
-                                    style="padding:0.3rem 0.6rem; font-size:0.8rem;"
-                                    data-codigo="{{ p.codigo }}"
-                                    data-nome="{{ p.nome }}"
-                                    data-preco="{{ '%.2f'|format(p.preco|float) }}"
-                                    data-label="{{ p.suggested_label or '' }}">
-                                Variação…
-                            </button>
-                        </div>
-                    </td>
-                </tr>
+                        </td>
+                        <td style="padding:0.55rem; white-space:nowrap;">
+                            <div style="display:flex; gap:0.35rem; flex-wrap:wrap;">
+                                {% if p.sync_enabled %}
+                                <form method="post" action="{{ url_for('products_sync_now') }}" style="margin:0;">
+                                    <input type="hidden" name="codigo" value="{{ p.codigo }}">
+                                    <input type="hidden" name="q" value="{{ q or '' }}">
+                                    <button type="submit" class="btn btn-secondary" style="padding:0.3rem 0.6rem; font-size:0.8rem;">Sync agora</button>
+                                </form>
+                                {% endif %}
+                                <button type="button" class="btn btn-secondary js-link-btn"
+                                        style="padding:0.3rem 0.6rem; font-size:0.8rem;"
+                                        data-codigo="{{ p.codigo }}"
+                                        data-nome="{{ p.nome }}"
+                                        data-preco="{{ '%.2f'|format(p.preco|float) }}"
+                                        data-suggested-label="{{ p.suggested_label or '' }}"
+                                        data-status='{{ p.link_status|tojson }}'>
+                                    Vincular…
+                                </button>
+                            </div>
+                        </td>
+                    </tr>
+                    {% endif %}
                 {% else %}
                 <tr>
                     <td colspan="6" style="padding:1rem; color:var(--muted);">Nenhum produto encontrado.</td>
@@ -123,74 +218,300 @@
     <p class="hint">
         Se aparecer só 1 item, confira em Configuração → UniPlus se a tabela/DSN apontam para o banco correto
         (<code>produto</code>) e se o Postgres UniPlus está acessível nesta máquina.
-        Produto pai da variação precisa existir no Compuchat (crie no cardápio se ainda não houver).
     </p>
     {% endif %}
 </div>
 
-<dialog id="attachModal" style="border:1px solid var(--line); border-radius:12px; padding:1.25rem; max-width:440px; width:calc(100% - 2rem); background:var(--panel, #fff); color:inherit;">
-    <form method="post" action="{{ url_for('products_attach_variation') }}" id="attachForm">
-        <h3 style="margin:0 0 0.5rem; font-size:1.1rem;">Definir como variação</h3>
-        <p style="margin:0 0 1rem; color:var(--muted); font-size:0.85rem;">
-            Remove o cadastro standalone no Compuchat (se existir) e cria a opção no produto pai com o código UniPlus.
-        </p>
-        <input type="hidden" name="q" value="{{ q or '' }}">
-        <input type="hidden" name="codigo" id="attachCodigo" value="">
-        <input type="hidden" name="preco" id="attachPreco" value="">
+<dialog id="linkModal">
+    <h3 style="margin:0 0 0.4rem; font-size:1.1rem;">Vincular ao Compuchat</h3>
+    <div style="margin-bottom:0.6rem; font-size:0.85rem;">
+        <strong id="linkCodigoLabel"></strong> — <span id="linkNomeLabel"></span> · R$ <span id="linkPrecoLabel"></span>
+    </div>
+    <div class="status-banner" id="linkStatusBanner"></div>
 
-        <label style="display:block; font-size:0.82rem; margin-bottom:0.25rem; color:var(--muted);">Código UniPlus</label>
-        <div id="attachCodigoLabel" style="font-family:ui-monospace,monospace; margin-bottom:0.75rem; font-weight:600;"></div>
+    <form id="linkForm" method="post">
+        <input type="hidden" name="q" id="linkQ">
+        <input type="hidden" name="codigo" id="linkCodigo">
+        <input type="hidden" name="preco" id="linkPreco">
 
-        <label style="display:block; font-size:0.82rem; margin-bottom:0.25rem; color:var(--muted);">Nome UniPlus</label>
-        <div id="attachNomeLabel" style="margin-bottom:0.75rem;"></div>
+        <div class="link-type-options">
+            <label><input type="radio" name="linkType" value="new" checked> Produto avulso novo</label>
+            <label><input type="radio" name="linkType" value="existing"> Produto avulso já existente</label>
+            <label><input type="radio" name="linkType" value="variation"> Variação de um produto pai</label>
+        </div>
 
-        <label for="attachParent" style="display:block; font-size:0.82rem; margin-bottom:0.25rem; color:var(--muted);">Produto pai (Compuchat)</label>
-        <select name="parentProductId" id="attachParent" required
-                style="width:100%; padding:0.5rem; margin-bottom:0.75rem; border:1px solid var(--line); border-radius:8px; background:inherit; color:inherit;">
-            <option value="">Selecione…</option>
-            {% for parent in parents or [] %}
-            <option value="{{ parent.id }}">{{ parent.name }}{% if parent.grupo %} · {{ parent.grupo }}{% endif %}{% if parent.idUniplus %} [{{ parent.idUniplus }}]{% endif %}</option>
-            {% endfor %}
-        </select>
+        <div class="link-fieldset" data-mode="new">
+            <div>
+                <label for="newNome">Nome do produto</label>
+                <input type="text" name="nome" id="newNome" required>
+            </div>
+            <div>
+                <label for="newGrupo">Grupo (categoria)</label>
+                <input type="text" name="grupo" id="newGrupo" list="gruposDatalist" placeholder="Ex: Pizzas, Bebidas…">
+            </div>
+        </div>
 
-        <label for="attachVariationName" style="display:block; font-size:0.82rem; margin-bottom:0.25rem; color:var(--muted);">Nome da variação</label>
-        <input type="text" name="variationName" id="attachVariationName" value="Tamanho"
-               style="width:100%; padding:0.5rem; margin-bottom:0.75rem; border:1px solid var(--line); border-radius:8px; box-sizing:border-box;">
+        <div class="link-fieldset" data-mode="existing" hidden>
+            <div>
+                <label for="existingProduct">Produto Compuchat</label>
+                <input type="text" id="existingProduct" list="productsDatalist" placeholder="Digite para buscar…" autocomplete="off">
+                <input type="hidden" name="productId" id="existingProductId">
+            </div>
+            <div>
+                <label for="existingNome">Nome</label>
+                <input type="text" name="nome" id="existingNome">
+            </div>
+            <div>
+                <label for="existingGrupo">Grupo (categoria)</label>
+                <input type="text" name="grupo" id="existingGrupo" list="gruposDatalist">
+            </div>
+        </div>
 
-        <label for="attachOptionLabel" style="display:block; font-size:0.82rem; margin-bottom:0.25rem; color:var(--muted);">Label da opção</label>
-        <input type="text" name="optionLabel" id="attachOptionLabel" placeholder="Ex: P, M, G"
-               style="width:100%; padding:0.5rem; margin-bottom:1rem; border:1px solid var(--line); border-radius:8px; box-sizing:border-box;">
+        <div class="link-fieldset" data-mode="variation" hidden>
+            <div>
+                <label for="variationParent">Produto pai</label>
+                <input type="text" id="variationParent" list="productsDatalist" placeholder="Digite para buscar…" autocomplete="off">
+                <input type="hidden" name="parentProductId" id="variationParentId">
+            </div>
+            <div>
+                <label for="variationParentGrupo">Grupo do pai (categoria)</label>
+                <input type="text" name="parentGrupo" id="variationParentGrupo" list="gruposDatalist">
+            </div>
+            <div>
+                <label for="variationName">Nome da variação</label>
+                <input type="text" name="variationName" id="variationName" list="variationNamesList" value="Tamanho">
+                <datalist id="variationNamesList"></datalist>
+            </div>
+            <div>
+                <label for="optionLabel">Label da opção</label>
+                <input type="text" name="optionLabel" id="optionLabel" list="optionLabelsList" placeholder="Ex: P, M, G">
+                <datalist id="optionLabelsList"></datalist>
+                <ul class="preview-list" id="variationPreview"></ul>
+            </div>
+        </div>
 
-        <div style="display:flex; gap:0.5rem; justify-content:flex-end;">
-            <button type="button" class="btn btn-secondary" onclick="document.getElementById('attachModal').close()">Cancelar</button>
-            <button type="submit" class="btn">Anexar</button>
+        <div style="display:flex; gap:0.5rem; justify-content:flex-end; margin-top:0.75rem;">
+            <button type="button" class="btn btn-secondary" id="linkCancelBtn">Cancelar</button>
+            <button type="submit" class="btn">Vincular</button>
         </div>
     </form>
 </dialog>
 
+<datalist id="gruposDatalist">
+    {% for g in grupos %}<option value="{{ g }}">{% endfor %}
+</datalist>
+<datalist id="productsDatalist">
+    {% for parent in parents or [] %}<option value="{{ parent.name }} · {{ parent.grupo or 'Sem grupo' }} (#{{ parent.id }})">{% endfor %}
+</datalist>
+<script type="application/json" id="parentsData">{{ parents|tojson }}</script>
+
 <script>
-function openAttachModal(codigo, nome, preco, suggestedLabel) {
-    var dlg = document.getElementById('attachModal');
-    document.getElementById('attachCodigo').value = codigo || '';
-    document.getElementById('attachPreco').value = preco || '';
-    document.getElementById('attachCodigoLabel').textContent = codigo || '';
-    document.getElementById('attachNomeLabel').textContent = nome || '';
-    document.getElementById('attachOptionLabel').value = suggestedLabel || '';
-    if (typeof dlg.showModal === 'function') {
-        dlg.showModal();
-    } else {
-        dlg.setAttribute('open', 'open');
+(function () {
+    var PARENTS = JSON.parse(document.getElementById('parentsData').textContent || '[]');
+    var PARENTS_BY_ID = {};
+    PARENTS.forEach(function (p) { PARENTS_BY_ID[p.id] = p; });
+
+    function formatProductOption(p) {
+        return p.name + ' · ' + (p.grupo || 'Sem grupo') + ' (#' + p.id + ')';
     }
-}
-document.querySelectorAll('.js-attach-var').forEach(function (btn) {
-    btn.addEventListener('click', function () {
-        openAttachModal(
-            btn.getAttribute('data-codigo') || '',
-            btn.getAttribute('data-nome') || '',
-            btn.getAttribute('data-preco') || '',
-            btn.getAttribute('data-label') || ''
-        );
+    function parseIdFromLabel(text) {
+        var m = /\(#(\d+)\)\s*$/.exec(text || '');
+        return m ? parseInt(m[1], 10) : null;
+    }
+
+    var dlg = document.getElementById('linkModal');
+    var form = document.getElementById('linkForm');
+    var radios = document.querySelectorAll('input[name="linkType"]');
+    var fieldsets = document.querySelectorAll('.link-fieldset');
+
+    var el = {
+        codigo: document.getElementById('linkCodigo'),
+        preco: document.getElementById('linkPreco'),
+        q: document.getElementById('linkQ'),
+        codigoLabel: document.getElementById('linkCodigoLabel'),
+        nomeLabel: document.getElementById('linkNomeLabel'),
+        precoLabel: document.getElementById('linkPrecoLabel'),
+        statusBanner: document.getElementById('linkStatusBanner'),
+
+        newNome: document.getElementById('newNome'),
+        newGrupo: document.getElementById('newGrupo'),
+
+        existingProduct: document.getElementById('existingProduct'),
+        existingProductId: document.getElementById('existingProductId'),
+        existingNome: document.getElementById('existingNome'),
+        existingGrupo: document.getElementById('existingGrupo'),
+
+        variationParent: document.getElementById('variationParent'),
+        variationParentId: document.getElementById('variationParentId'),
+        variationParentGrupo: document.getElementById('variationParentGrupo'),
+        variationName: document.getElementById('variationName'),
+        optionLabel: document.getElementById('optionLabel'),
+        variationPreview: document.getElementById('variationPreview'),
+        variationNamesList: document.getElementById('variationNamesList'),
+        optionLabelsList: document.getElementById('optionLabelsList'),
+    };
+
+    function setMode(mode) {
+        fieldsets.forEach(function (fs) {
+            var active = fs.getAttribute('data-mode') === mode;
+            fs.hidden = !active;
+            fs.querySelectorAll('input').forEach(function (input) {
+                input.disabled = !active;
+            });
+        });
+        radios.forEach(function (r) { r.checked = (r.value === mode); });
+        form.action = mode === 'variation' ? '{{ url_for("products_attach_variation") }}' : '{{ url_for("products_link_standalone") }}';
+    }
+
+    radios.forEach(function (r) {
+        r.addEventListener('change', function () { setMode(r.value); });
     });
-});
+
+    el.existingProduct.addEventListener('change', function () {
+        var id = parseIdFromLabel(el.existingProduct.value);
+        var p = id != null ? PARENTS_BY_ID[id] : null;
+        el.existingProductId.value = p ? p.id : '';
+        if (p) {
+            el.existingNome.value = p.name || '';
+            el.existingGrupo.value = p.grupo || '';
+        }
+    });
+
+    function updateOptionsPreview(parent) {
+        el.optionLabelsList.innerHTML = '';
+        el.variationPreview.innerHTML = '';
+        if (!parent) return;
+        var typed = (el.variationName.value || '').trim().toLowerCase();
+        var variation = (parent.variations || []).filter(function (v) {
+            return (v.name || '').trim().toLowerCase() === typed;
+        })[0];
+        if (!variation) return;
+        (variation.options || []).forEach(function (o) {
+            var opt = document.createElement('option');
+            opt.value = o.label;
+            el.optionLabelsList.appendChild(opt);
+            var li = document.createElement('li');
+            li.textContent = o.label + (o.idUniplus ? ' (código ' + o.idUniplus + ')' : '') + ' · R$ ' + Number(o.value || 0).toFixed(2);
+            el.variationPreview.appendChild(li);
+        });
+    }
+
+    function refreshVariationDatalists(parent) {
+        el.variationNamesList.innerHTML = '';
+        if (parent) {
+            (parent.variations || []).forEach(function (v) {
+                var opt = document.createElement('option');
+                opt.value = v.name;
+                el.variationNamesList.appendChild(opt);
+            });
+        }
+        updateOptionsPreview(parent);
+    }
+
+    el.variationParent.addEventListener('change', function () {
+        var id = parseIdFromLabel(el.variationParent.value);
+        var p = id != null ? PARENTS_BY_ID[id] : null;
+        el.variationParentId.value = p ? p.id : '';
+        el.variationParentGrupo.value = p ? (p.grupo || '') : '';
+        if (!el.variationName.value) el.variationName.value = 'Tamanho';
+        refreshVariationDatalists(p);
+    });
+
+    el.variationName.addEventListener('input', function () {
+        var id = parseInt(el.variationParentId.value || '0', 10);
+        updateOptionsPreview(PARENTS_BY_ID[id]);
+    });
+
+    function statusText(status) {
+        if (!status || status.kind === 'unlinked') return 'Atualmente: não vinculado.';
+        if (status.kind === 'standalone') {
+            return 'Atualmente: produto avulso → "' + status.productName + '" (#' + status.productId + ').';
+        }
+        return 'Atualmente: variação de "' + status.parentName + '" → ' + status.variationName + ': ' + status.optionLabel + '.';
+    }
+
+    window.openLinkModal = function (btn) {
+        var codigo = btn.getAttribute('data-codigo') || '';
+        var nome = btn.getAttribute('data-nome') || '';
+        var preco = btn.getAttribute('data-preco') || '0';
+        var status = JSON.parse(btn.getAttribute('data-status') || '{"kind":"unlinked"}');
+
+        el.codigo.value = codigo;
+        el.preco.value = preco;
+        el.q.value = document.getElementById('searchQ') ? document.getElementById('searchQ').value : '';
+        el.codigoLabel.textContent = codigo;
+        el.nomeLabel.textContent = nome;
+        el.precoLabel.textContent = Number(preco).toFixed(2);
+        el.statusBanner.textContent = statusText(status);
+
+        el.newNome.value = nome;
+        el.newGrupo.value = '';
+
+        el.existingProduct.value = '';
+        el.existingProductId.value = '';
+        el.existingNome.value = nome;
+        el.existingGrupo.value = '';
+
+        el.variationParent.value = '';
+        el.variationParentId.value = '';
+        el.variationParentGrupo.value = '';
+        el.variationName.value = 'Tamanho';
+        el.optionLabel.value = btn.getAttribute('data-suggested-label') || '';
+        el.variationPreview.innerHTML = '';
+        el.optionLabelsList.innerHTML = '';
+        el.variationNamesList.innerHTML = '';
+
+        var mode = 'new';
+        if (status.kind === 'standalone') {
+            mode = 'existing';
+            var sp = PARENTS_BY_ID[status.productId];
+            el.existingProduct.value = sp ? formatProductOption(sp) : (status.productName + ' (#' + status.productId + ')');
+            el.existingProductId.value = status.productId;
+            el.existingNome.value = status.productName || nome;
+            el.existingGrupo.value = status.grupo || '';
+        } else if (status.kind === 'variation') {
+            mode = 'variation';
+            var vp = PARENTS_BY_ID[status.parentId];
+            el.variationParent.value = vp ? formatProductOption(vp) : (status.parentName + ' (#' + status.parentId + ')');
+            el.variationParentId.value = status.parentId;
+            el.variationParentGrupo.value = status.parentGrupo || '';
+            el.variationName.value = status.variationName || 'Tamanho';
+            el.optionLabel.value = status.optionLabel || '';
+            refreshVariationDatalists(vp);
+        }
+        setMode(mode);
+
+        if (typeof dlg.showModal === 'function') { dlg.showModal(); } else { dlg.setAttribute('open', 'open'); }
+    };
+
+    document.querySelectorAll('.js-link-btn').forEach(function (btn) {
+        btn.addEventListener('click', function () { window.openLinkModal(btn); });
+    });
+
+    document.getElementById('linkCancelBtn').addEventListener('click', function () {
+        dlg.close();
+    });
+
+    form.addEventListener('submit', function (e) {
+        var mode = document.querySelector('input[name="linkType"]:checked').value;
+        if (mode === 'existing' && !el.existingProductId.value) {
+            e.preventDefault();
+            alert('Selecione um produto existente na lista.');
+        } else if (mode === 'variation' && !el.variationParentId.value) {
+            e.preventDefault();
+            alert('Selecione um produto pai na lista.');
+        }
+    });
+
+    document.querySelectorAll('.js-group-toggle').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+            var key = btn.getAttribute('data-group');
+            var rows = document.querySelectorAll('tr.group-child[data-group="' + key + '"]');
+            var isHidden = rows.length > 0 && rows[0].style.display === 'none';
+            rows.forEach(function (r) { r.style.display = isHidden ? 'table-row' : 'none'; });
+            btn.textContent = isHidden ? '▼' : '▶';
+        });
+    });
+})();
 </script>
 {% endblock %}

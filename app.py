@@ -347,9 +347,39 @@ def logs():
     )
 
 
+def _find_parent_name(parents, product_id):
+    try:
+        pid = int(product_id)
+    except (TypeError, ValueError):
+        return None
+    for p in parents or []:
+        if p.get("id") == pid:
+            return p.get("name")
+    return None
+
+
+def _friendly_error(exc: Exception, parents) -> str:
+    """Traduz erros crus do backend (ex.: ERR_UNIPLUS_CODIGO_IN_OTHER_OPTION:12) em mensagens legíveis."""
+    msg = str(exc)
+    if "ERR_UNIPLUS_CODIGO_IN_OTHER_OPTION" in msg:
+        try:
+            other_id = msg.split("ERR_UNIPLUS_CODIGO_IN_OTHER_OPTION:")[1].split('"')[0].strip()
+            other_id = "".join(ch for ch in other_id if ch.isdigit())
+        except Exception:
+            other_id = ""
+        other_name = _find_parent_name(parents, other_id) if other_id else None
+        alvo = f"“{other_name}” (#{other_id})" if other_name else f"produto #{other_id}"
+        return f"Este código já está vinculado a {alvo}. Desvincule antes de anexar aqui."
+    if "ERR_UNIPLUS_ATTACH_NOT_LEAF" in msg:
+        return "O produto avulso com esse código já tem variações próprias — remova manualmente antes de vincular."
+    if "ERR_PRODUCT_NOT_FOUND" in msg:
+        return "Produto Compuchat não encontrado (pode ter sido removido). Atualize a página e tente de novo."
+    return msg
+
+
 @app.route("/products")
 def products_page():
-    """Lista produtos UniPlus e marca sync automático."""
+    """Lista produtos UniPlus com status de vínculo e agrupamento por produto pai."""
     import product_sync
 
     q = (request.args.get("q") or "").strip()
@@ -364,6 +394,8 @@ def products_page():
     products = []
     parents = []
     parents_error = None
+    display_rows = []
+    grupos = []
     enabled_map = {p["codigo"]: p for p in db.list_sync_products()}
     enabled_count = sum(1 for p in enabled_map.values() if p.get("enabled"))
     list_error = None
@@ -383,21 +415,82 @@ def products_page():
             message = f"Erro ao listar produtos UniPlus: {e}"
             message_type = "error"
         try:
-            parents = product_sync.list_compuchat_products(limit=500)
+            parents = product_sync.list_compuchat_products(limit=1000)
         except Exception as e:
             parents_error = str(e)
+        if products:
+            product_sync.annotate_link_status(products, parents)
+            display_rows = product_sync.build_display_rows(products)
+        grupos = product_sync.distinct_grupos(parents)
     return render_template(
         "products.html",
         active_nav="products",
         products=products,
         parents=parents,
         parents_error=parents_error,
+        display_rows=display_rows,
+        grupos=grupos,
         enabled_count=enabled_count,
         q=q,
         uniplus_enabled=uniplus_on,
         message=message,
         message_type=message_type,
         list_error=list_error,
+    )
+
+
+@app.route("/products/link-standalone", methods=["POST"])
+def products_link_standalone():
+    """Vincula codigo UniPlus a um produto avulso (novo ou existente) no Compuchat."""
+    import product_sync  # noqa: F401 (usado abaixo)
+
+    codigo = (request.form.get("codigo") or "").strip()
+    q = (request.form.get("q") or "").strip()
+    nome = (request.form.get("nome") or "").strip()
+    grupo = (request.form.get("grupo") or "").strip()
+    preco_raw = (request.form.get("preco") or "").strip()
+    product_id_raw = (request.form.get("productId") or "").strip()
+    try:
+        preco = float(preco_raw) if preco_raw else 0.0
+    except ValueError:
+        preco = 0.0
+    product_id = None
+    if product_id_raw:
+        try:
+            product_id = int(product_id_raw)
+        except ValueError:
+            product_id = None
+
+    parents_for_errors = []
+    try:
+        parents_for_errors = product_sync.list_compuchat_products(limit=1000)
+    except Exception:
+        pass
+
+    try:
+        if not codigo or not nome:
+            raise RuntimeError("Informe o codigo e o nome do produto")
+        result = product_sync.link_standalone(
+            codigo=codigo,
+            nome=nome,
+            preco=preco,
+            grupo=grupo,
+            product_id=product_id,
+        )
+        action = result.get("action") or "ok"
+        msg = f"Produto avulso {action}: {codigo} → produto #{result.get('productId')}"
+        if result.get("removedProductId"):
+            msg += f" · desvinculado #{result.get('removedProductId')}"
+        try:
+            product_sync.enable_product(codigo, enabled=True)
+        except Exception:
+            pass
+        mtype = "success"
+    except Exception as e:
+        msg = f"Falha ao vincular {codigo}: {_friendly_error(e, parents_for_errors)}"
+        mtype = "error"
+    return redirect(
+        url_for("products_page", q=q, message=msg, message_type=mtype)
     )
 
 
@@ -414,6 +507,7 @@ def products_attach_variation():
         parent_id = 0
     variation_name = (request.form.get("variationName") or "Tamanho").strip()
     option_label = (request.form.get("optionLabel") or "").strip()
+    parent_grupo = (request.form.get("parentGrupo") or "").strip()
     preco_raw = (request.form.get("preco") or "").strip()
     preco = None
     if preco_raw:
@@ -421,6 +515,13 @@ def products_attach_variation():
             preco = float(preco_raw)
         except ValueError:
             preco = None
+
+    parents_for_errors = []
+    try:
+        parents_for_errors = product_sync.list_compuchat_products(limit=1000)
+    except Exception:
+        pass
+
     try:
         if not codigo or parent_id <= 0:
             raise RuntimeError("Informe o codigo UniPlus e o produto pai Compuchat")
@@ -430,6 +531,7 @@ def products_attach_variation():
             variation_name=variation_name,
             option_label=option_label,
             preco=preco,
+            parent_grupo=parent_grupo,
         )
         removed = result.get("removedProductId")
         msg = (
@@ -445,7 +547,7 @@ def products_attach_variation():
             pass
         mtype = "success"
     except Exception as e:
-        msg = f"Falha ao anexar variação {codigo}: {e}"
+        msg = f"Falha ao anexar variação {codigo}: {_friendly_error(e, parents_for_errors)}"
         mtype = "error"
     return redirect(
         url_for("products_page", q=q, message=msg, message_type=mtype)

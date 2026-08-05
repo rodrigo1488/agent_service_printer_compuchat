@@ -331,9 +331,9 @@ def _compuchat_request(
 
 
 def list_compuchat_products(
-    *, q: str = "", limit: int = 200
+    *, q: str = "", limit: int = 1000
 ) -> List[Dict[str, Any]]:
-    """Lista Products Compuchat (para escolher produto pai de variação)."""
+    """Lista Products Compuchat (para escolher produto pai/avulso e anotar status)."""
     data = _compuchat_request(
         "GET",
         "/agent/products",
@@ -350,6 +350,7 @@ def attach_variation_to_parent(
     variation_name: str = "Tamanho",
     option_label: str = "",
     preco: Optional[float] = None,
+    parent_grupo: str = "",
 ) -> Dict[str, Any]:
     """Anexa codigo UniPlus como opção de variação no produto pai Compuchat."""
     body: Dict[str, Any] = {
@@ -360,8 +361,32 @@ def attach_variation_to_parent(
     }
     if preco is not None:
         body["preco"] = float(preco)
+    if (parent_grupo or "").strip():
+        body["parentGrupo"] = parent_grupo.strip()
     return _compuchat_request(
         "POST", "/agent/products/attach-variation", body=body, timeout=45
+    )
+
+
+def link_standalone(
+    *,
+    codigo: str,
+    nome: str,
+    preco: float,
+    grupo: str = "",
+    product_id: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Vincula codigo UniPlus a um produto avulso (novo ou existente) no Compuchat."""
+    body: Dict[str, Any] = {
+        "codigo": str(codigo or "").strip()[:20],
+        "nome": str(nome or "").strip(),
+        "preco": float(preco or 0),
+        "grupo": (grupo or "").strip(),
+    }
+    if product_id:
+        body["productId"] = int(product_id)
+    return _compuchat_request(
+        "POST", "/agent/products/link-standalone", body=body, timeout=45
     )
 
 
@@ -371,6 +396,103 @@ def suggest_option_label(nome: str, codigo: str = "") -> str:
     if last and last.upper() in {"P", "M", "G", "GG", "PP", "XG", "XP"}:
         return last.upper()
     return last or str(codigo or "").strip()
+
+
+def annotate_link_status(
+    products: List[Dict[str, Any]], parents: List[Dict[str, Any]]
+) -> None:
+    """
+    Cruza cada produto UniPlus com o catálogo Compuchat (parents, já carregado)
+    e anota em-place `p["link_status"]`:
+      - {"kind": "unlinked"}
+      - {"kind": "standalone", "productId", "productName", "grupo"}
+      - {"kind": "variation", "parentId", "parentName", "parentGrupo",
+         "variationId", "variationName", "optionId", "optionLabel"}
+    """
+    standalone_map: Dict[str, Dict[str, Any]] = {}
+    option_map: Dict[str, Dict[str, Any]] = {}
+    for parent in parents:
+        p_codigo = str(parent.get("idUniplus") or "").strip()
+        if p_codigo:
+            standalone_map[p_codigo] = {
+                "productId": parent.get("id"),
+                "productName": parent.get("name"),
+                "grupo": parent.get("grupo"),
+            }
+        for variation in parent.get("variations") or []:
+            for option in variation.get("options") or []:
+                o_codigo = str(option.get("idUniplus") or "").strip()
+                if not o_codigo:
+                    continue
+                option_map[o_codigo] = {
+                    "parentId": parent.get("id"),
+                    "parentName": parent.get("name"),
+                    "parentGrupo": parent.get("grupo"),
+                    "variationId": variation.get("id"),
+                    "variationName": variation.get("name"),
+                    "optionId": option.get("id"),
+                    "optionLabel": option.get("label"),
+                }
+
+    for p in products:
+        codigo = str(p.get("codigo") or "").strip()
+        if codigo in option_map:
+            p["link_status"] = {"kind": "variation", **option_map[codigo]}
+        elif codigo in standalone_map:
+            p["link_status"] = {"kind": "standalone", **standalone_map[codigo]}
+        else:
+            p["link_status"] = {"kind": "unlinked"}
+
+
+def build_display_rows(products: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Agrupa itens com link_status.kind == "variation" por parentId, num único
+    registro recolhível; demais viram linhas simples. Requer annotate_link_status
+    já ter rodado.
+    """
+    groups: Dict[Any, Dict[str, Any]] = {}
+    singles: List[Dict[str, Any]] = []
+
+    for p in products:
+        status = p.get("link_status") or {"kind": "unlinked"}
+        if status.get("kind") == "variation":
+            parent_id = status.get("parentId")
+            group = groups.get(parent_id)
+            if not group:
+                group = {
+                    "type": "group",
+                    "parent": {
+                        "id": parent_id,
+                        "name": status.get("parentName") or f"Produto #{parent_id}",
+                        "grupo": status.get("parentGrupo"),
+                    },
+                    # Nome evita colidir com dict.items() na dot-notation do Jinja
+                    "children": [],
+                }
+                groups[parent_id] = group
+            group["children"].append(p)
+        else:
+            singles.append({"type": "single", "item": p})
+
+    rows: List[Dict[str, Any]] = list(groups.values()) + singles
+
+    def sort_key(row: Dict[str, Any]) -> str:
+        if row["type"] == "group":
+            return str(row["parent"]["name"] or "").lower()
+        return str(row["item"].get("nome") or "").lower()
+
+    rows.sort(key=sort_key)
+    return rows
+
+
+def distinct_grupos(parents: List[Dict[str, Any]]) -> List[str]:
+    """Lista ordenada de grupos (categorias) já usados, para sugestão no combo."""
+    grupos = {
+        str(p.get("grupo") or "").strip()
+        for p in parents
+        if str(p.get("grupo") or "").strip()
+    }
+    return sorted(grupos, key=lambda s: s.lower())
 
 
 def upsert_to_compuchat(
