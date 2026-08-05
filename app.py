@@ -8,7 +8,7 @@ from flask_cors import CORS
 
 import db
 from agent import start_agent_thread, stop_agent
-from product_sync import start_product_sync_thread
+from product_sync import refresh_product_sync_thread, start_product_sync_thread
 from error_recovery import DataValidator, DatabaseRecovery
 
 # Tentar importar win32print para listar impressoras locais (Windows)
@@ -52,6 +52,9 @@ def _config_context():
     uniplus_produto_nome_column = db.get_config("uniplus_produto_nome_column") or "nome"
     uniplus_contamesa_table = db.get_config("uniplus_contamesa_table") or "contamesa"
     uniplus_contamesaitem_table = db.get_config("uniplus_contamesaitem_table") or "contamesaitem"
+    uniplus_product_sync_poll = (db.get_config("uniplus_product_sync_poll") or "false").lower() in (
+        "true", "1", "yes", "on"
+    )
     return {
         "active_nav": "config",
         "ws_url": ws_url,
@@ -66,6 +69,7 @@ def _config_context():
         "uniplus_produto_nome_column": uniplus_produto_nome_column,
         "uniplus_contamesa_table": uniplus_contamesa_table,
         "uniplus_contamesaitem_table": uniplus_contamesaitem_table,
+        "uniplus_product_sync_poll": uniplus_product_sync_poll,
     }
 
 
@@ -123,25 +127,18 @@ def _build_health_status():
 
     health_status["printers"]["health"] = printer_health
 
-    # UniPlus Postgres
-    from uniplus_handler import is_uniplus_enabled, validate_uniplus_connection
+    # UniPlus: NÃO abrir conexão no health (Unico interpreta sessão concorrente).
+    from uniplus_handler import is_uniplus_enabled
+    from product_sync import is_product_sync_poll_enabled
 
     uniplus_on = is_uniplus_enabled(db)
     uniplus_info = {
         "enabled": uniplus_on,
         "db_ok": None,
+        "product_sync_poll": is_product_sync_poll_enabled(),
         "last_error": db.get_config("uniplus_last_error") or "",
+        "note": "conexão sob demanda (jobs/produtos); health não testa o Postgres",
     }
-    if uniplus_on:
-        ok_dsn, dsn_msg = validate_uniplus_connection(
-            db.get_config("uniplus_connection_string") or "",
-            contamesa_table=db.get_config("uniplus_contamesa_table") or "contamesa",
-            contamesaitem_table=db.get_config("uniplus_contamesaitem_table") or "contamesaitem",
-        )
-        uniplus_info["db_ok"] = ok_dsn
-        if not ok_dsn:
-            uniplus_info["last_error"] = dsn_msg
-            health_status["status"] = "degraded"
     health_status["uniplus"] = uniplus_info
 
     if health_status["database"]["status"] != "ok":
@@ -201,8 +198,20 @@ def config():
             if ws_url:
                 db.set_config("ws_url", ws_url)
 
+            uniplus_product_sync_poll = request.form.get(
+                "uniplus_product_sync_poll", ""
+            ).lower() in ("true", "1", "on", "yes")
+
             db.set_config("uniplus_enabled", "true" if uniplus_enabled else "false")
             db.set_config("uniplus_connection_string", uniplus_dsn)
+            db.set_config(
+                "uniplus_product_sync_poll",
+                "true" if uniplus_product_sync_poll else "false",
+            )
+            try:
+                refresh_product_sync_thread()
+            except Exception as sync_exc:
+                print(f"[WARN] refresh product_sync: {sync_exc}")
             for key, value in uniplus_tables.items():
                 db.set_config(key, value)
 
@@ -353,6 +362,8 @@ def products_page():
         "on",
     )
     products = []
+    parents = []
+    parents_error = None
     enabled_map = {p["codigo"]: p for p in db.list_sync_products()}
     enabled_count = sum(1 for p in enabled_map.values() if p.get("enabled"))
     list_error = None
@@ -364,20 +375,80 @@ def products_page():
                 p["sync_enabled"] = bool(local.get("enabled"))
                 p["last_synced_at"] = local.get("last_synced_at")
                 p["last_error"] = local.get("last_error") or ""
+                p["suggested_label"] = product_sync.suggest_option_label(
+                    p.get("nome") or "", p.get("codigo") or ""
+                )
         except Exception as e:
             list_error = str(e)
             message = f"Erro ao listar produtos UniPlus: {e}"
             message_type = "error"
+        try:
+            parents = product_sync.list_compuchat_products(limit=500)
+        except Exception as e:
+            parents_error = str(e)
     return render_template(
         "products.html",
         active_nav="products",
         products=products,
+        parents=parents,
+        parents_error=parents_error,
         enabled_count=enabled_count,
         q=q,
         uniplus_enabled=uniplus_on,
         message=message,
         message_type=message_type,
         list_error=list_error,
+    )
+
+
+@app.route("/products/attach-variation", methods=["POST"])
+def products_attach_variation():
+    """Anexa codigo UniPlus como variação de um produto pai no Compuchat."""
+    import product_sync
+
+    codigo = (request.form.get("codigo") or "").strip()
+    q = (request.form.get("q") or "").strip()
+    try:
+        parent_id = int(request.form.get("parentProductId") or 0)
+    except (TypeError, ValueError):
+        parent_id = 0
+    variation_name = (request.form.get("variationName") or "Tamanho").strip()
+    option_label = (request.form.get("optionLabel") or "").strip()
+    preco_raw = (request.form.get("preco") or "").strip()
+    preco = None
+    if preco_raw:
+        try:
+            preco = float(preco_raw)
+        except ValueError:
+            preco = None
+    try:
+        if not codigo or parent_id <= 0:
+            raise RuntimeError("Informe o codigo UniPlus e o produto pai Compuchat")
+        result = product_sync.attach_variation_to_parent(
+            codigo=codigo,
+            parent_product_id=parent_id,
+            variation_name=variation_name,
+            option_label=option_label,
+            preco=preco,
+        )
+        removed = result.get("removedProductId")
+        msg = (
+            f"Variação anexada: {codigo} → produto #{result.get('parentProductId')} "
+            f"(option #{result.get('optionId')})"
+        )
+        if removed:
+            msg += f" · removido standalone #{removed}"
+        # Mantém sync ON para o codigo atualizar preço na option
+        try:
+            product_sync.enable_product(codigo, enabled=True)
+        except Exception:
+            pass
+        mtype = "success"
+    except Exception as e:
+        msg = f"Falha ao anexar variação {codigo}: {e}"
+        mtype = "error"
+    return redirect(
+        url_for("products_page", q=q, message=msg, message_type=mtype)
     )
 
 

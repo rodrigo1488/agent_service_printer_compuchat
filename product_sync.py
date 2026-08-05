@@ -6,6 +6,7 @@ import logging
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -19,7 +20,8 @@ from uniplus_handler import (
 
 logger = logging.getLogger("product_sync")
 
-POLL_INTERVAL_SEC = 30
+# Intervalo alto de propósito — poll contínuo conflita com o Unico no mesmo Postgres.
+POLL_INTERVAL_SEC = 300
 UPSERT_CHUNK_SIZE = 100
 _sync_thread: Optional[threading.Thread] = None
 _should_stop = False
@@ -287,6 +289,88 @@ def fetch_uniplus_product(codigo: str) -> Optional[Dict[str, Any]]:
             }
     finally:
         conn.close()
+
+
+def _compuchat_request(
+    method: str,
+    path: str,
+    *,
+    body: Optional[Dict[str, Any]] = None,
+    query: Optional[Dict[str, str]] = None,
+    timeout: int = 30,
+) -> Dict[str, Any]:
+    device_id, token = _device_auth()
+    if not device_id or not token:
+        raise RuntimeError("Configure device_id e token de uma impressora no PrintAgent")
+    base = _api_base_from_ws(db.get_config("ws_url") or "")
+    if not base:
+        raise RuntimeError("ws_url não configurada")
+    url = f"{base}{path}"
+    if query:
+        qs = urllib.parse.urlencode(
+            {k: v for k, v in query.items() if v is not None and v != ""}
+        )
+        if qs:
+            url = f"{url}?{qs}"
+    data = None
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "X-Device-Id": device_id,
+    }
+    if body is not None:
+        data = json.dumps(body).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+    req = urllib.request.Request(url, data=data, method=method, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=max(15, int(timeout))) as resp:
+            raw = resp.read().decode("utf-8")
+            return json.loads(raw) if raw else {}
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode("utf-8", errors="replace")[:400]
+        raise RuntimeError(f"HTTP {e.code}: {detail}") from e
+
+
+def list_compuchat_products(
+    *, q: str = "", limit: int = 200
+) -> List[Dict[str, Any]]:
+    """Lista Products Compuchat (para escolher produto pai de variação)."""
+    data = _compuchat_request(
+        "GET",
+        "/agent/products",
+        query={"q": (q or "").strip(), "limit": str(limit)},
+        timeout=30,
+    )
+    return list(data.get("products") or [])
+
+
+def attach_variation_to_parent(
+    *,
+    codigo: str,
+    parent_product_id: int,
+    variation_name: str = "Tamanho",
+    option_label: str = "",
+    preco: Optional[float] = None,
+) -> Dict[str, Any]:
+    """Anexa codigo UniPlus como opção de variação no produto pai Compuchat."""
+    body: Dict[str, Any] = {
+        "codigo": str(codigo or "").strip()[:20],
+        "parentProductId": int(parent_product_id),
+        "variationName": (variation_name or "Tamanho").strip() or "Tamanho",
+        "optionLabel": (option_label or "").strip(),
+    }
+    if preco is not None:
+        body["preco"] = float(preco)
+    return _compuchat_request(
+        "POST", "/agent/products/attach-variation", body=body, timeout=45
+    )
+
+
+def suggest_option_label(nome: str, codigo: str = "") -> str:
+    tokens = [t for t in str(nome or "").strip().split() if t]
+    last = tokens[-1] if tokens else ""
+    if last and last.upper() in {"P", "M", "G", "GG", "PP", "XG", "XP"}:
+        return last.upper()
+    return last or str(codigo or "").strip()
 
 
 def upsert_to_compuchat(
@@ -616,8 +700,21 @@ def _poll_loop():
     logger.info("product_sync worker parado")
 
 
+def is_product_sync_poll_enabled() -> bool:
+    """Poll contínuo fica OFF por padrão — Unico reclama de conexão concorrente no Postgres."""
+    raw = (db.get_config("uniplus_product_sync_poll") or "false").lower()
+    return raw in ("true", "1", "yes", "on") and is_uniplus_enabled(db)
+
+
 def start_product_sync_thread() -> None:
+    """Só inicia o poller se explicitamente habilitado na config."""
     global _sync_thread, _should_stop
+    if not is_product_sync_poll_enabled():
+        logger.info(
+            "product_sync poll desligado (uniplus_product_sync_poll=false) — "
+            "sync só sob demanda na tela Produtos / jobs UniPlus"
+        )
+        return
     with _lock:
         if _sync_thread and _sync_thread.is_alive():
             return
@@ -631,3 +728,12 @@ def start_product_sync_thread() -> None:
 def stop_product_sync_thread() -> None:
     global _should_stop
     _should_stop = True
+
+
+def refresh_product_sync_thread() -> None:
+    """Liga/desliga o poller conforme a config atual (após salvar)."""
+    if is_product_sync_poll_enabled():
+        start_product_sync_thread()
+    else:
+        stop_product_sync_thread()
+        logger.info("product_sync poll parado")

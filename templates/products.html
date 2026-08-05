@@ -5,7 +5,8 @@
     <h2 class="page-title">Produtos UniPlus</h2>
     <p class="page-sub">
         Marque os produtos para sincronização automática com o Compuchat (nome + preço).
-        Alterações no UniPlus sobem em até ~30s. Chave: campo <strong>codigo</strong> (não o id interno).
+        Use <strong>Variação…</strong> para anexar um código UniPlus como opção (ex. P/M/G) de um produto pai.
+        Chave: campo <strong>codigo</strong> (não o id interno).
     </p>
 
     {% if message %}
@@ -38,6 +39,12 @@
             {% if q %} · filtro “{{ q }}”{% endif %}
         </span>
     </div>
+
+    {% if parents_error %}
+    <div class="alert alert-error" style="margin-bottom:0.75rem;">
+        Não foi possível listar produtos Compuchat para variação: {{ parents_error }}
+    </div>
+    {% endif %}
 
     <div style="overflow:auto;">
         <table class="table" style="width:100%; border-collapse:collapse; font-size:0.9rem;">
@@ -81,14 +88,24 @@
                             <span style="color:var(--muted);">—</span>
                         {% endif %}
                     </td>
-                    <td style="padding:0.55rem;">
-                        {% if p.sync_enabled %}
-                        <form method="post" action="{{ url_for('products_sync_now') }}" style="margin:0;">
-                            <input type="hidden" name="codigo" value="{{ p.codigo }}">
-                            <input type="hidden" name="q" value="{{ q or '' }}">
-                            <button type="submit" class="btn btn-secondary" style="padding:0.3rem 0.6rem; font-size:0.8rem;">Sync agora</button>
-                        </form>
-                        {% endif %}
+                    <td style="padding:0.55rem; white-space:nowrap;">
+                        <div style="display:flex; gap:0.35rem; flex-wrap:wrap;">
+                            {% if p.sync_enabled %}
+                            <form method="post" action="{{ url_for('products_sync_now') }}" style="margin:0;">
+                                <input type="hidden" name="codigo" value="{{ p.codigo }}">
+                                <input type="hidden" name="q" value="{{ q or '' }}">
+                                <button type="submit" class="btn btn-secondary" style="padding:0.3rem 0.6rem; font-size:0.8rem;">Sync agora</button>
+                            </form>
+                            {% endif %}
+                            <button type="button" class="btn btn-secondary js-attach-var"
+                                    style="padding:0.3rem 0.6rem; font-size:0.8rem;"
+                                    data-codigo="{{ p.codigo }}"
+                                    data-nome="{{ p.nome }}"
+                                    data-preco="{{ '%.2f'|format(p.preco|float) }}"
+                                    data-label="{{ p.suggested_label or '' }}">
+                                Variação…
+                            </button>
+                        </div>
                     </td>
                 </tr>
                 {% else %}
@@ -106,7 +123,74 @@
     <p class="hint">
         Se aparecer só 1 item, confira em Configuração → UniPlus se a tabela/DSN apontam para o banco correto
         (<code>produto</code>) e se o Postgres UniPlus está acessível nesta máquina.
+        Produto pai da variação precisa existir no Compuchat (crie no cardápio se ainda não houver).
     </p>
     {% endif %}
 </div>
+
+<dialog id="attachModal" style="border:1px solid var(--line); border-radius:12px; padding:1.25rem; max-width:440px; width:calc(100% - 2rem); background:var(--panel, #fff); color:inherit;">
+    <form method="post" action="{{ url_for('products_attach_variation') }}" id="attachForm">
+        <h3 style="margin:0 0 0.5rem; font-size:1.1rem;">Definir como variação</h3>
+        <p style="margin:0 0 1rem; color:var(--muted); font-size:0.85rem;">
+            Remove o cadastro standalone no Compuchat (se existir) e cria a opção no produto pai com o código UniPlus.
+        </p>
+        <input type="hidden" name="q" value="{{ q or '' }}">
+        <input type="hidden" name="codigo" id="attachCodigo" value="">
+        <input type="hidden" name="preco" id="attachPreco" value="">
+
+        <label style="display:block; font-size:0.82rem; margin-bottom:0.25rem; color:var(--muted);">Código UniPlus</label>
+        <div id="attachCodigoLabel" style="font-family:ui-monospace,monospace; margin-bottom:0.75rem; font-weight:600;"></div>
+
+        <label style="display:block; font-size:0.82rem; margin-bottom:0.25rem; color:var(--muted);">Nome UniPlus</label>
+        <div id="attachNomeLabel" style="margin-bottom:0.75rem;"></div>
+
+        <label for="attachParent" style="display:block; font-size:0.82rem; margin-bottom:0.25rem; color:var(--muted);">Produto pai (Compuchat)</label>
+        <select name="parentProductId" id="attachParent" required
+                style="width:100%; padding:0.5rem; margin-bottom:0.75rem; border:1px solid var(--line); border-radius:8px; background:inherit; color:inherit;">
+            <option value="">Selecione…</option>
+            {% for parent in parents or [] %}
+            <option value="{{ parent.id }}">{{ parent.name }}{% if parent.grupo %} · {{ parent.grupo }}{% endif %}{% if parent.idUniplus %} [{{ parent.idUniplus }}]{% endif %}</option>
+            {% endfor %}
+        </select>
+
+        <label for="attachVariationName" style="display:block; font-size:0.82rem; margin-bottom:0.25rem; color:var(--muted);">Nome da variação</label>
+        <input type="text" name="variationName" id="attachVariationName" value="Tamanho"
+               style="width:100%; padding:0.5rem; margin-bottom:0.75rem; border:1px solid var(--line); border-radius:8px; box-sizing:border-box;">
+
+        <label for="attachOptionLabel" style="display:block; font-size:0.82rem; margin-bottom:0.25rem; color:var(--muted);">Label da opção</label>
+        <input type="text" name="optionLabel" id="attachOptionLabel" placeholder="Ex: P, M, G"
+               style="width:100%; padding:0.5rem; margin-bottom:1rem; border:1px solid var(--line); border-radius:8px; box-sizing:border-box;">
+
+        <div style="display:flex; gap:0.5rem; justify-content:flex-end;">
+            <button type="button" class="btn btn-secondary" onclick="document.getElementById('attachModal').close()">Cancelar</button>
+            <button type="submit" class="btn">Anexar</button>
+        </div>
+    </form>
+</dialog>
+
+<script>
+function openAttachModal(codigo, nome, preco, suggestedLabel) {
+    var dlg = document.getElementById('attachModal');
+    document.getElementById('attachCodigo').value = codigo || '';
+    document.getElementById('attachPreco').value = preco || '';
+    document.getElementById('attachCodigoLabel').textContent = codigo || '';
+    document.getElementById('attachNomeLabel').textContent = nome || '';
+    document.getElementById('attachOptionLabel').value = suggestedLabel || '';
+    if (typeof dlg.showModal === 'function') {
+        dlg.showModal();
+    } else {
+        dlg.setAttribute('open', 'open');
+    }
+}
+document.querySelectorAll('.js-attach-var').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+        openAttachModal(
+            btn.getAttribute('data-codigo') || '',
+            btn.getAttribute('data-nome') || '',
+            btn.getAttribute('data-preco') || '',
+            btn.getAttribute('data-label') || ''
+        );
+    });
+});
+</script>
 {% endblock %}
