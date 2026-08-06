@@ -375,6 +375,10 @@ def _friendly_error(exc: Exception, parents) -> str:
         return "O produto avulso com esse código já tem variações próprias — remova manualmente antes de vincular."
     if "ERR_PRODUCT_NOT_FOUND" in msg:
         return "Produto Compuchat não encontrado (pode ter sido removido). Atualize a página e tente de novo."
+    if "ERR_UNIPLUS_ADDON_NOT_FOUND" in msg:
+        return "Adicional Compuchat não encontrado (pode ter sido removido). Atualize a página e tente de novo."
+    if "ERR_UNIPLUS_ADDON_ID_REQUIRED" in msg:
+        return "Selecione um adicional válido na lista."
     return msg
 
 
@@ -395,6 +399,8 @@ def products_page():
     products = []
     parents = []
     parents_error = None
+    addons_catalog = []
+    addons_error = None
     pending_singles = []
     pending_count = 0
     clusters = []
@@ -423,8 +429,12 @@ def products_page():
             parents = product_sync.list_compuchat_products(limit=1000)
         except Exception as e:
             parents_error = str(e)
+        try:
+            addons_catalog = product_sync.list_compuchat_addons(limit=1000)
+        except Exception as e:
+            addons_error = str(e)
         if products:
-            product_sync.annotate_link_status(products, parents)
+            product_sync.annotate_link_status(products, parents, addons_catalog)
             pending, linked = product_sync.split_pending_and_linked(products)
             pending_count = len(pending)
             clusters = product_sync.suggest_flavor_clusters(pending)
@@ -443,6 +453,8 @@ def products_page():
         products=products,
         parents=parents,
         parents_error=parents_error,
+        addons_catalog=addons_catalog,
+        addons_error=addons_error,
         pending_singles=pending_singles,
         pending_count=pending_count,
         clusters=clusters,
@@ -507,6 +519,34 @@ def products_link_standalone():
         mtype = "success"
     except Exception as e:
         msg = f"Falha ao vincular {codigo}: {_friendly_error(e, parents_for_errors)}"
+        mtype = "error"
+    return redirect(
+        url_for("products_page", q=q, message=msg, message_type=mtype)
+    )
+
+
+@app.route("/products/link-addon", methods=["POST"])
+def products_link_addon():
+    """Vincula codigo UniPlus a um adicional (AddOnItem) existente no Compuchat."""
+    import product_sync
+
+    codigo = (request.form.get("codigo") or "").strip()
+    q = (request.form.get("q") or "").strip()
+    add_on_item_id_raw = (request.form.get("addOnItemId") or "").strip()
+
+    try:
+        if not codigo or not add_on_item_id_raw:
+            raise RuntimeError("Selecione o adicional para vincular")
+        add_on_item_id = int(add_on_item_id_raw)
+        result = product_sync.link_addon(codigo=codigo, add_on_item_id=add_on_item_id)
+        msg = f"Adicional vinculado: {codigo} → \"{result.get('label')}\" (#{result.get('addOnItemId')})"
+        if result.get("removedProductId"):
+            msg += f" · desvinculado produto #{result.get('removedProductId')}"
+        if result.get("clearedOptionIds"):
+            msg += f" · desvinculado(s) option(s) {result.get('clearedOptionIds')}"
+        mtype = "success"
+    except Exception as e:
+        msg = f"Falha ao vincular adicional {codigo}: {_friendly_error(e, [])}"
         mtype = "error"
     return redirect(
         url_for("products_page", q=q, message=msg, message_type=mtype)

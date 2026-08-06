@@ -344,6 +344,18 @@ def list_compuchat_products(
     return list(data.get("products") or [])
 
 
+def list_compuchat_addons(*, limit: int = 1000) -> List[Dict[str, Any]]:
+    """Lista AddOnItems (adicionais) Compuchat, achatados (grupo/subgrupo já
+    resolvidos), pra escolher no modo "Adicional" do modal de vínculo."""
+    data = _compuchat_request(
+        "GET",
+        "/agent/products",
+        query={"limit": str(limit)},
+        timeout=30,
+    )
+    return list(data.get("addOns") or [])
+
+
 def attach_variation_to_parent(
     *,
     codigo: str,
@@ -391,6 +403,17 @@ def link_standalone(
     )
 
 
+def link_addon(*, codigo: str, add_on_item_id: int) -> Dict[str, Any]:
+    """Vincula codigo UniPlus a um adicional (AddOnItem) existente no Compuchat."""
+    body: Dict[str, Any] = {
+        "codigo": str(codigo or "").strip()[:20],
+        "addOnItemId": int(add_on_item_id),
+    }
+    return _compuchat_request(
+        "POST", "/agent/products/link-addon", body=body, timeout=45
+    )
+
+
 def unlink_codigo(*, codigo: str) -> Dict[str, Any]:
     """Remove qualquer vinculo (avulso ou variação) do codigo no Compuchat."""
     body: Dict[str, Any] = {"codigo": str(codigo or "").strip()[:20]}
@@ -422,18 +445,32 @@ def suggest_option_label(nome: str, codigo: str = "") -> str:
 
 
 def annotate_link_status(
-    products: List[Dict[str, Any]], parents: List[Dict[str, Any]]
+    products: List[Dict[str, Any]],
+    parents: List[Dict[str, Any]],
+    addons: Optional[List[Dict[str, Any]]] = None,
 ) -> None:
     """
-    Cruza cada produto UniPlus com o catálogo Compuchat (parents, já carregado)
-    e anota em-place `p["link_status"]`:
+    Cruza cada produto UniPlus com o catálogo Compuchat (parents/addons, já
+    carregados) e anota em-place `p["link_status"]`:
       - {"kind": "unlinked"}
       - {"kind": "standalone", "productId", "productName", "grupo"}
       - {"kind": "variation", "parentId", "parentName", "parentGrupo",
          "variationId", "variationName", "optionId", "optionLabel"}
+      - {"kind": "addon", "addOnItemId", "label", "groupName", "subgroupName"}
     """
     standalone_map: Dict[str, Dict[str, Any]] = {}
     option_map: Dict[str, Dict[str, Any]] = {}
+    addon_map: Dict[str, Dict[str, Any]] = {}
+    for addon in addons or []:
+        a_codigo = str(addon.get("idUniplus") or "").strip()
+        if not a_codigo:
+            continue
+        addon_map[a_codigo] = {
+            "addOnItemId": addon.get("id"),
+            "label": addon.get("label"),
+            "groupName": addon.get("groupName"),
+            "subgroupName": addon.get("subgroupName"),
+        }
     for parent in parents:
         p_codigo = str(parent.get("idUniplus") or "").strip()
         if p_codigo:
@@ -463,6 +500,8 @@ def annotate_link_status(
             p["link_status"] = {"kind": "variation", **option_map[codigo]}
         elif codigo in standalone_map:
             p["link_status"] = {"kind": "standalone", **standalone_map[codigo]}
+        elif codigo in addon_map:
+            p["link_status"] = {"kind": "addon", **addon_map[codigo]}
         else:
             p["link_status"] = {"kind": "unlinked"}
 
@@ -490,15 +529,38 @@ def build_linked_cards(linked_products: List[Dict[str, Any]]) -> List[Dict[str, 
     cai no mesmo card). Elimina a duplicação visual de um mesmo produto
     Compuchat aparecendo em duas linhas separadas (avulso + pai de variação).
 
+    Adicionais (kind == "addon") ganham um card próprio por addOnItemId —
+    são um catálogo separado de Product, então nunca se misturam com
+    variações/avulsos de produto.
+
     Retorna cards no formato:
       {"productId", "productName", "grupo", "standalone": <item ou None>,
-       "variations": [{"variationId", "variationName", "options": [...items...]}]}
+       "variations": [{"variationId", "variationName", "options": [...items...]}],
+       "isAddOn": bool}
     """
     cards: Dict[Any, Dict[str, Any]] = {}
 
     for p in linked_products:
         status = p.get("link_status") or {}
         kind = status.get("kind")
+        if kind == "addon":
+            product_id = ("addon", status.get("addOnItemId"))
+            name = status.get("label") or f"Adicional #{status.get('addOnItemId')}"
+            group_bits = [
+                b for b in [status.get("groupName"), status.get("subgroupName")] if b
+            ]
+            grupo = " / ".join(group_bits) or None
+            card = {
+                "productId": product_id,
+                "productName": name,
+                "grupo": grupo,
+                "standalone": p,
+                "variations": [],
+                "isAddOn": True,
+                "codesCount": 1,
+            }
+            cards[product_id] = card
+            continue
         if kind == "standalone":
             product_id = status.get("productId")
             name = status.get("productName") or f"Produto #{product_id}"

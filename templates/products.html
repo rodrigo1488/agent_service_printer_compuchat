@@ -215,6 +215,11 @@
         Não foi possível carregar produtos Compuchat para vínculo: {{ parents_error }}
     </div>
     {% endif %}
+    {% if addons_error %}
+    <div class="alert alert-error" style="margin-bottom:0.75rem;">
+        Não foi possível carregar adicionais Compuchat para vínculo: {{ addons_error }}
+    </div>
+    {% endif %}
 
     <details class="section-toggle" open>
         <summary>Pendentes de vínculo ({{ pending_count }})</summary>
@@ -314,6 +319,7 @@
             <summary>
                 <span style="flex:1;">
                     {{ card.productName }}
+                    {% if card.isAddOn %}<span class="badge badge-muted" style="margin-left:0.4rem;">Adicional</span>{% endif %}
                     {% if card.grupo %}<span style="color:var(--muted); font-weight:400;"> · {{ card.grupo }}</span>{% endif %}
                 </span>
                 <span class="badge badge-ok">{{ card.codesCount }} código(s)</span>
@@ -322,7 +328,7 @@
                 {% if card.standalone %}
                 <div class="linked-row">
                     <div class="linked-row-main">
-                        <span class="badge badge-muted" style="margin-right:0.4rem;">Avulso</span>
+                        <span class="badge badge-muted" style="margin-right:0.4rem;">{{ 'Adicional' if card.isAddOn else 'Avulso' }}</span>
                         <span style="font-family:ui-monospace, monospace;">{{ card.standalone.codigo }}</span>
                         — {{ card.standalone.nome }} · R$ {{ '%.2f'|format(card.standalone.preco|float) }}
                     </div>
@@ -378,6 +384,7 @@
             <label><input type="radio" name="linkType" value="new" checked> Produto avulso novo</label>
             <label><input type="radio" name="linkType" value="existing"> Produto avulso já existente</label>
             <label><input type="radio" name="linkType" value="variation"> Variação de um produto pai</label>
+            <label><input type="radio" name="linkType" value="addon"> Adicional (ex.: borda, bacon extra)</label>
         </div>
 
         <div class="link-fieldset" data-mode="new">
@@ -430,6 +437,14 @@
             </div>
         </div>
 
+        <div class="link-fieldset" data-mode="addon" hidden>
+            <div>
+                <label for="addonItem">Adicional</label>
+                <input type="text" id="addonItem" list="addonsDatalist" placeholder="Digite para buscar…" autocomplete="off">
+                <input type="hidden" name="addOnItemId" id="addonItemId">
+            </div>
+        </div>
+
         <div style="display:flex; gap:0.5rem; justify-content:flex-end; margin-top:0.75rem;">
             <button type="button" class="btn btn-secondary" id="linkCancelBtn">Cancelar</button>
             <button type="submit" class="btn">Vincular</button>
@@ -443,7 +458,11 @@
 <datalist id="productsDatalist">
     {% for parent in parents or [] %}<option value="{{ parent.name }} · {{ parent.grupo or 'Sem grupo' }} (#{{ parent.id }})">{% endfor %}
 </datalist>
+<datalist id="addonsDatalist">
+    {% for a in addons_catalog or [] %}<option value="{{ a.label }} · {{ a.groupName }}{% if a.subgroupName %} / {{ a.subgroupName }}{% endif %} (#{{ a.id }})">{% endfor %}
+</datalist>
 <script type="application/json" id="parentsData">{{ parents|tojson }}</script>
+<script type="application/json" id="addonsData">{{ addons_catalog|tojson }}</script>
 
 <script>
 (function () {
@@ -451,8 +470,17 @@
     var PARENTS_BY_ID = {};
     PARENTS.forEach(function (p) { PARENTS_BY_ID[p.id] = p; });
 
+    var ADDONS = JSON.parse(document.getElementById('addonsData').textContent || '[]');
+    var ADDONS_BY_ID = {};
+    ADDONS.forEach(function (a) { ADDONS_BY_ID[a.id] = a; });
+
     function formatProductOption(p) {
         return p.name + ' · ' + (p.grupo || 'Sem grupo') + ' (#' + p.id + ')';
+    }
+    function formatAddonOption(a) {
+        var grupo = a.groupName || '';
+        if (a.subgroupName) grupo += ' / ' + a.subgroupName;
+        return a.label + ' · ' + (grupo || 'Sem grupo') + ' (#' + a.id + ')';
     }
     function parseIdFromLabel(text) {
         var m = /\(#(\d+)\)\s*$/.exec(text || '');
@@ -489,6 +517,9 @@
         variationPreview: document.getElementById('variationPreview'),
         variationNamesList: document.getElementById('variationNamesList'),
         optionLabelsList: document.getElementById('optionLabelsList'),
+
+        addonItem: document.getElementById('addonItem'),
+        addonItemId: document.getElementById('addonItemId'),
     };
 
     function setMode(mode) {
@@ -500,7 +531,11 @@
             });
         });
         radios.forEach(function (r) { r.checked = (r.value === mode); });
-        form.action = mode === 'variation' ? '{{ url_for("products_attach_variation") }}' : '{{ url_for("products_link_standalone") }}';
+        form.action = mode === 'variation'
+            ? '{{ url_for("products_attach_variation") }}'
+            : mode === 'addon'
+                ? '{{ url_for("products_link_addon") }}'
+                : '{{ url_for("products_link_standalone") }}';
     }
 
     radios.forEach(function (r) {
@@ -562,10 +597,21 @@
         updateOptionsPreview(PARENTS_BY_ID[id]);
     });
 
+    el.addonItem.addEventListener('change', function () {
+        var id = parseIdFromLabel(el.addonItem.value);
+        var a = id != null ? ADDONS_BY_ID[id] : null;
+        el.addonItemId.value = a ? a.id : '';
+    });
+
     function statusText(status) {
         if (!status || status.kind === 'unlinked') return 'Atualmente: não vinculado.';
         if (status.kind === 'standalone') {
             return 'Atualmente: produto avulso → "' + status.productName + '" (#' + status.productId + ').';
+        }
+        if (status.kind === 'addon') {
+            var grupo = status.groupName || '';
+            if (status.subgroupName) grupo += ' / ' + status.subgroupName;
+            return 'Atualmente: adicional → "' + status.label + '"' + (grupo ? ' (' + grupo + ')' : '') + '.';
         }
         return 'Atualmente: variação de "' + status.parentName + '" → ' + status.variationName + ': ' + status.optionLabel + '.';
     }
@@ -608,6 +654,9 @@
         el.optionLabelsList.innerHTML = '';
         el.variationNamesList.innerHTML = '';
 
+        el.addonItem.value = '';
+        el.addonItemId.value = '';
+
         var mode = 'new';
         if (status.kind === 'standalone') {
             mode = 'existing';
@@ -625,6 +674,11 @@
             el.variationName.value = status.variationName || 'Tamanho';
             el.optionLabel.value = status.optionLabel || '';
             refreshVariationDatalists(vp);
+        } else if (status.kind === 'addon') {
+            mode = 'addon';
+            var ai = ADDONS_BY_ID[status.addOnItemId];
+            el.addonItem.value = ai ? formatAddonOption(ai) : (status.label + ' (#' + status.addOnItemId + ')');
+            el.addonItemId.value = status.addOnItemId;
         }
         setMode(mode);
 
@@ -647,6 +701,9 @@
         } else if (mode === 'variation' && !el.variationParentId.value) {
             e.preventDefault();
             alert('Selecione um produto pai na lista.');
+        } else if (mode === 'addon' && !el.addonItemId.value) {
+            e.preventDefault();
+            alert('Selecione um adicional na lista.');
         }
     });
 
