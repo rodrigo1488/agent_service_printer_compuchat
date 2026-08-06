@@ -5,6 +5,7 @@ import json
 import logging
 import threading
 import time
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -390,6 +391,28 @@ def link_standalone(
     )
 
 
+def unlink_codigo(*, codigo: str) -> Dict[str, Any]:
+    """Remove qualquer vinculo (avulso ou variação) do codigo no Compuchat."""
+    body: Dict[str, Any] = {"codigo": str(codigo or "").strip()[:20]}
+    return _compuchat_request(
+        "POST", "/agent/products/unlink", body=body, timeout=30
+    )
+
+
+def create_parent_product(
+    *, nome: str, grupo: str = "", preco: float = 0.0
+) -> Dict[str, Any]:
+    """Cria um Product Compuchat sem codigo próprio, só pra servir de pai de variação."""
+    body: Dict[str, Any] = {
+        "nome": str(nome or "").strip(),
+        "grupo": (grupo or "").strip(),
+        "preco": float(preco or 0),
+    }
+    return _compuchat_request(
+        "POST", "/agent/products/create-parent", body=body, timeout=30
+    )
+
+
 def suggest_option_label(nome: str, codigo: str = "") -> str:
     tokens = [t for t in str(nome or "").strip().split() if t]
     last = tokens[-1] if tokens else ""
@@ -444,45 +467,195 @@ def annotate_link_status(
             p["link_status"] = {"kind": "unlinked"}
 
 
-def build_display_rows(products: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """
-    Agrupa itens com link_status.kind == "variation" por parentId, num único
-    registro recolhível; demais viram linhas simples. Requer annotate_link_status
-    já ter rodado.
-    """
-    groups: Dict[Any, Dict[str, Any]] = {}
-    singles: List[Dict[str, Any]] = []
-
+def split_pending_and_linked(
+    products: List[Dict[str, Any]]
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Separa produtos UniPlus (já anotados por annotate_link_status) em
+    (pendentes, vinculados) conforme link_status.kind."""
+    pending: List[Dict[str, Any]] = []
+    linked: List[Dict[str, Any]] = []
     for p in products:
         status = p.get("link_status") or {"kind": "unlinked"}
-        if status.get("kind") == "variation":
-            parent_id = status.get("parentId")
-            group = groups.get(parent_id)
-            if not group:
-                group = {
-                    "type": "group",
-                    "parent": {
-                        "id": parent_id,
-                        "name": status.get("parentName") or f"Produto #{parent_id}",
-                        "grupo": status.get("parentGrupo"),
-                    },
-                    # Nome evita colidir com dict.items() na dot-notation do Jinja
-                    "children": [],
-                }
-                groups[parent_id] = group
-            group["children"].append(p)
+        if status.get("kind") == "unlinked":
+            pending.append(p)
         else:
-            singles.append({"type": "single", "item": p})
+            linked.append(p)
+    return pending, linked
 
-    rows: List[Dict[str, Any]] = list(groups.values()) + singles
 
-    def sort_key(row: Dict[str, Any]) -> str:
-        if row["type"] == "group":
-            return str(row["parent"]["name"] or "").lower()
-        return str(row["item"].get("nome") or "").lower()
+def build_linked_cards(linked_products: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Agrupa produtos UniPlus já vinculados pelo productId Compuchat *real*
+    (productId do avulso ou parentId da variação — o que for o mesmo produto
+    cai no mesmo card). Elimina a duplicação visual de um mesmo produto
+    Compuchat aparecendo em duas linhas separadas (avulso + pai de variação).
 
-    rows.sort(key=sort_key)
-    return rows
+    Retorna cards no formato:
+      {"productId", "productName", "grupo", "standalone": <item ou None>,
+       "variations": [{"variationId", "variationName", "options": [...items...]}]}
+    """
+    cards: Dict[Any, Dict[str, Any]] = {}
+
+    for p in linked_products:
+        status = p.get("link_status") or {}
+        kind = status.get("kind")
+        if kind == "standalone":
+            product_id = status.get("productId")
+            name = status.get("productName") or f"Produto #{product_id}"
+            grupo = status.get("grupo")
+        elif kind == "variation":
+            product_id = status.get("parentId")
+            name = status.get("parentName") or f"Produto #{product_id}"
+            grupo = status.get("parentGrupo")
+        else:
+            continue
+
+        card = cards.get(product_id)
+        if not card:
+            card = {
+                "productId": product_id,
+                "productName": name,
+                "grupo": grupo,
+                "standalone": None,
+                "variations": [],
+            }
+            cards[product_id] = card
+        # Nome sempre reflete a fonte mais recente (standalone tende a ser a
+        # mais confiável, já que "é" o próprio produto).
+        if kind == "standalone" or not card.get("productName"):
+            card["productName"] = name
+        if grupo:
+            card["grupo"] = grupo
+
+        if kind == "standalone":
+            card["standalone"] = p
+        else:
+            variation_id = status.get("variationId")
+            variation_group = next(
+                (v for v in card["variations"] if v.get("variationId") == variation_id),
+                None,
+            )
+            if not variation_group:
+                variation_group = {
+                    "variationId": variation_id,
+                    "variationName": status.get("variationName") or "Variação",
+                    "options": [],
+                }
+                card["variations"].append(variation_group)
+            variation_group["options"].append(p)
+
+    def option_sort_key(item: Dict[str, Any]) -> Tuple[int, int, float]:
+        label = (item.get("link_status") or {}).get("optionLabel") or ""
+        rank = SIZE_RANK.get(_normalize_size_token(label))
+        return (
+            0 if rank is not None else 1,
+            rank if rank is not None else 0,
+            float(item.get("preco") or 0),
+        )
+
+    result = list(cards.values())
+    for card in result:
+        card["variations"].sort(key=lambda v: str(v.get("variationName") or "").lower())
+        for variation_group in card["variations"]:
+            variation_group["options"].sort(key=option_sort_key)
+        card["codesCount"] = (1 if card.get("standalone") else 0) + sum(
+            len(v["options"]) for v in card["variations"]
+        )
+    result.sort(key=lambda c: str(c.get("productName") or "").lower())
+    return result
+
+
+# Tokens de tamanho conhecidos (normalizados: maiúsculas, sem acento) e sua
+# ordem relativa, usada pra ordenar clusters/opções (P < M < G < GG). Tokens
+# fora dessa lista nunca formam cluster — heurística conservadora, sem
+# falso-positivo.
+SIZE_RANK: Dict[str, int] = {
+    "PP": 0,
+    "XP": 0,
+    "P": 1,
+    "PEQUENO": 1,
+    "PEQUENA": 1,
+    "BROTINHO": 1,
+    "INDIVIDUAL": 1,
+    "M": 2,
+    "MEDIO": 2,
+    "MEDIA": 2,
+    "G": 3,
+    "GRANDE": 3,
+    "GG": 4,
+    "XG": 4,
+    "JUMBO": 4,
+    "FAMILIA": 4,
+}
+
+
+def _normalize_size_token(token: str) -> str:
+    token = str(token or "").strip().strip(".,-").upper()
+    token = unicodedata.normalize("NFKD", token)
+    token = "".join(ch for ch in token if not unicodedata.combining(ch))
+    return token
+
+
+def detect_size_token(nome: str) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Procura um token de tamanho conhecido no fim do nome (ex.: "Pizza Calabresa
+    Grande" → ("Pizza Calabresa", "Grande")). Retorna (None, None) se o último
+    token não for um tamanho reconhecido, evitando falso-positivo.
+    """
+    nome = str(nome or "").strip()
+    if not nome:
+        return None, None
+    tokens = nome.split()
+    if len(tokens) < 2:
+        return None, None
+    last = tokens[-1]
+    if _normalize_size_token(last) not in SIZE_RANK:
+        return None, None
+    base = " ".join(tokens[:-1]).strip()
+    if not base:
+        return None, None
+    return base, last
+
+
+def suggest_flavor_clusters(pending_products: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Olha só itens pendentes (link_status.kind == "unlinked") e agrupa por
+    nome-base normalizado quando 2+ códigos compartilham o mesmo nome-base
+    com tamanhos diferentes — sugestão de "isso parece ser o mesmo sabor em
+    tamanhos diferentes". Cada cluster já vem ordenado por tamanho
+    (P < M < G < GG, fallback por preço).
+
+    Retorna [{"baseName", "codes": [...items anotados com size_label...]}].
+    """
+    groups: Dict[str, Dict[str, Any]] = {}
+
+    for p in pending_products:
+        status = p.get("link_status") or {}
+        if status.get("kind") != "unlinked":
+            continue
+        base, size_label = detect_size_token(p.get("nome") or "")
+        if not base or not size_label:
+            continue
+        key = _normalize_size_token(base) or base.strip().upper()
+        group = groups.get(key)
+        if not group:
+            group = {"baseName": base, "codes": []}
+            groups[key] = group
+        group["codes"].append({**p, "size_label": size_label})
+
+    def sort_key(item: Dict[str, Any]) -> Tuple[int, int, float]:
+        rank = SIZE_RANK.get(_normalize_size_token(item.get("size_label") or ""))
+        return (
+            0 if rank is not None else 1,
+            rank if rank is not None else 0,
+            float(item.get("preco") or 0),
+        )
+
+    clusters = [g for g in groups.values() if len(g["codes"]) >= 2]
+    for cluster in clusters:
+        cluster["codes"].sort(key=sort_key)
+    clusters.sort(key=lambda c: str(c.get("baseName") or "").lower())
+    return clusters
 
 
 def distinct_grupos(parents: List[Dict[str, Any]]) -> List[str]:

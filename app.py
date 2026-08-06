@@ -3,6 +3,7 @@ import os
 import sys
 import threading
 from datetime import datetime
+from typing import List, Optional
 from flask import Flask, request, redirect, url_for, render_template, jsonify
 from flask_cors import CORS
 
@@ -394,7 +395,11 @@ def products_page():
     products = []
     parents = []
     parents_error = None
-    display_rows = []
+    pending_singles = []
+    pending_count = 0
+    clusters = []
+    linked_cards = []
+    linked_codes_count = 0
     grupos = []
     enabled_map = {p["codigo"]: p for p in db.list_sync_products()}
     enabled_count = sum(1 for p in enabled_map.values() if p.get("enabled"))
@@ -420,7 +425,17 @@ def products_page():
             parents_error = str(e)
         if products:
             product_sync.annotate_link_status(products, parents)
-            display_rows = product_sync.build_display_rows(products)
+            pending, linked = product_sync.split_pending_and_linked(products)
+            pending_count = len(pending)
+            clusters = product_sync.suggest_flavor_clusters(pending)
+            clustered_codes = {
+                item.get("codigo") for cluster in clusters for item in cluster["codes"]
+            }
+            pending_singles = [
+                p for p in pending if p.get("codigo") not in clustered_codes
+            ]
+            linked_cards = product_sync.build_linked_cards(linked)
+            linked_codes_count = len(linked)
         grupos = product_sync.distinct_grupos(parents)
     return render_template(
         "products.html",
@@ -428,7 +443,11 @@ def products_page():
         products=products,
         parents=parents,
         parents_error=parents_error,
-        display_rows=display_rows,
+        pending_singles=pending_singles,
+        pending_count=pending_count,
+        clusters=clusters,
+        linked_cards=linked_cards,
+        linked_codes_count=linked_codes_count,
         grupos=grupos,
         enabled_count=enabled_count,
         q=q,
@@ -494,6 +513,38 @@ def products_link_standalone():
     )
 
 
+@app.route("/products/unlink", methods=["POST"])
+def products_unlink():
+    """Remove o vinculo (avulso ou variação) de um codigo UniPlus no Compuchat."""
+    import product_sync
+
+    codigo = (request.form.get("codigo") or "").strip()
+    q = (request.form.get("q") or "").strip()
+    try:
+        if not codigo:
+            raise RuntimeError("Informe o codigo")
+        result = product_sync.unlink_codigo(codigo=codigo)
+        # Desliga sync automático local, senão o próximo poll/"Sync agora"
+        # recria o vínculo avulso automaticamente (grupo "Outros").
+        try:
+            db.set_sync_product_enabled(codigo, False)
+        except Exception:
+            pass
+        msg = f"Código {codigo} desvinculado."
+        if result.get("removedProductId"):
+            msg += f" · produto avulso #{result.get('removedProductId')} removido"
+        if result.get("clearedOptionIds"):
+            ids = ", ".join(str(i) for i in result.get("clearedOptionIds") or [])
+            msg += f" · opção(ões) desvinculada(s): {ids}"
+        mtype = "success"
+    except Exception as e:
+        msg = f"Falha ao desvincular {codigo}: {_friendly_error(e, [])}"
+        mtype = "error"
+    return redirect(
+        url_for("products_page", q=q, message=msg, message_type=mtype)
+    )
+
+
 @app.route("/products/attach-variation", methods=["POST"])
 def products_attach_variation():
     """Anexa codigo UniPlus como variação de um produto pai no Compuchat."""
@@ -548,6 +599,80 @@ def products_attach_variation():
         mtype = "success"
     except Exception as e:
         msg = f"Falha ao anexar variação {codigo}: {_friendly_error(e, parents_for_errors)}"
+        mtype = "error"
+    return redirect(
+        url_for("products_page", q=q, message=msg, message_type=mtype)
+    )
+
+
+@app.route("/products/transform-cluster", methods=["POST"])
+def products_transform_cluster():
+    """Cria um produto pai novo e anexa cada codigo do cluster sugerido como
+    variação (tamanho) dele — usado pelo card "Parecem ser tamanhos do mesmo
+    produto" da seção Pendentes."""
+    import product_sync
+
+    q = (request.form.get("q") or "").strip()
+    nome = (request.form.get("nome") or "").strip()
+    grupo = (request.form.get("grupo") or "").strip()
+    codigos = [c.strip() for c in request.form.getlist("codigos") if c.strip()]
+    labels = request.form.getlist("labels")
+    precos_raw = request.form.getlist("precos")
+
+    try:
+        if not nome:
+            raise RuntimeError("Informe o nome do produto")
+        if len(codigos) < 2:
+            raise RuntimeError("Selecione ao menos 2 códigos para formar as variações")
+
+        def preco_at(i: int) -> Optional[float]:
+            if i >= len(precos_raw) or not str(precos_raw[i]).strip():
+                return None
+            try:
+                return float(precos_raw[i])
+            except ValueError:
+                return None
+
+        base_preco = preco_at(0) or 0.0
+        created = product_sync.create_parent_product(
+            nome=nome, grupo=grupo, preco=base_preco
+        )
+        parent_id = created.get("productId")
+
+        ok = 0
+        fail = 0
+        errors: List[str] = []
+        for i, codigo in enumerate(codigos):
+            label = labels[i].strip() if i < len(labels) and labels[i] else ""
+            try:
+                product_sync.attach_variation_to_parent(
+                    codigo=codigo,
+                    parent_product_id=parent_id,
+                    variation_name="Tamanho",
+                    option_label=label,
+                    preco=preco_at(i),
+                    parent_grupo=grupo,
+                )
+                try:
+                    product_sync.enable_product(codigo, enabled=True)
+                except Exception:
+                    pass
+                ok += 1
+            except Exception as e:
+                fail += 1
+                if len(errors) < 5:
+                    errors.append(f"{codigo}: {_friendly_error(e, [])}")
+
+        msg = f"Produto “{nome}” criado (#{parent_id}) com {ok} variação(ões)"
+        if fail:
+            msg += f", {fail} falha(s)"
+            if errors:
+                msg += " — " + "; ".join(errors)
+            mtype = "error"
+        else:
+            mtype = "success"
+    except Exception as e:
+        msg = f"Falha ao transformar cluster “{nome}”: {_friendly_error(e, [])}"
         mtype = "error"
     return redirect(
         url_for("products_page", q=q, message=msg, message_type=mtype)

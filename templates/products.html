@@ -32,27 +32,150 @@
         padding: 0.5rem 0.7rem;
         margin-bottom: 0.75rem;
     }
-    tr.group-row td { background: #f3f7f9; font-weight: 600; }
-    .group-toggle-btn {
-        background: transparent;
-        border: none;
-        color: var(--ink);
-        font-size: 0.9rem;
-        cursor: pointer;
-        padding: 0.1rem 0.3rem;
-        margin-right: 0.3rem;
-    }
-    tr.group-child td:first-child { padding-left: 1.8rem; }
     .preview-list { list-style: none; font-size: 0.8rem; color: var(--muted); margin-top: 0.2rem; max-height: 90px; overflow: auto; }
+
+    /* Seções recolhíveis (Pendentes / Já vinculados) */
+    details.section-toggle { margin-bottom: 1.25rem; }
+    details.section-toggle > summary {
+        cursor: pointer;
+        list-style: none;
+        font-size: 1.05rem;
+        font-weight: 700;
+        padding: 0.5rem 0;
+        border-bottom: 1px solid var(--line);
+        margin-bottom: 0.75rem;
+    }
+    details.section-toggle > summary::-webkit-details-marker { display: none; }
+    details.section-toggle > summary::before { content: '▾  '; color: var(--muted); }
+    details.section-toggle:not([open]) > summary::before { content: '▸  '; }
+
+    /* Cards de sugestão de cluster */
+    .cluster-card {
+        border: 1px solid #ffd98e;
+        background: #fffaf0;
+        border-radius: 12px;
+        padding: 0.8rem 1rem;
+        margin-bottom: 0.75rem;
+    }
+    .cluster-card h4 { margin: 0 0 0.4rem; font-size: 0.95rem; }
+    .cluster-items { list-style: none; padding: 0; margin: 0 0 0.65rem; font-size: 0.83rem; color: var(--muted); }
+    .cluster-items li { padding: 0.1rem 0; }
+    .cluster-form-row { display: flex; gap: 0.6rem; flex-wrap: wrap; align-items: flex-end; }
+    .cluster-form-row label { font-size: 0.78rem; color: var(--muted); display: block; margin-bottom: 0.15rem; }
+    .cluster-form-row input { padding: 0.45rem 0.6rem; border: 1px solid var(--line); border-radius: 8px; }
+
+    /* Cards de produto já vinculado */
+    details.linked-card {
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        margin-bottom: 0.6rem;
+        overflow: visible;
+    }
+    details.linked-card > summary {
+        list-style: none;
+        cursor: pointer;
+        padding: 0.65rem 0.9rem;
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        background: #f7fafb;
+        font-weight: 600;
+        border-radius: 12px;
+    }
+    details.linked-card[open] > summary { border-radius: 12px 12px 0 0; }
+    details.linked-card > summary::-webkit-details-marker { display: none; }
+    details.linked-card > summary::before { content: '▸'; font-size: 0.75rem; color: var(--muted); }
+    details.linked-card[open] > summary::before { content: '▾'; }
+    .linked-card-body { padding: 0.5rem 0.9rem 0.75rem; }
+    .linked-row {
+        display: flex;
+        align-items: center;
+        gap: 0.6rem;
+        padding: 0.5rem 0;
+        border-bottom: 1px solid var(--line);
+        flex-wrap: wrap;
+    }
+    .linked-row:last-child { border-bottom: none; }
+    .linked-row .linked-row-main { flex: 1; min-width: 200px; font-size: 0.88rem; }
+    .variation-group { margin-top: 0.4rem; }
+    .variation-group-title { font-size: 0.78rem; color: var(--muted); font-weight: 700; text-transform: uppercase; letter-spacing: 0.03em; margin: 0.5rem 0 0.15rem; }
+
+    /* Menu de ações por linha (um único botão) */
+    details.row-menu { position: relative; display: inline-block; }
+    details.row-menu > summary {
+        list-style: none;
+        cursor: pointer;
+        padding: 0.32rem 0.65rem;
+        font-size: 0.8rem;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--surface);
+        white-space: nowrap;
+    }
+    details.row-menu > summary::-webkit-details-marker { display: none; }
+    details.row-menu[open] > summary { background: #eef3f5; }
+    .row-menu-panel {
+        position: absolute;
+        right: 0;
+        top: calc(100% + 4px);
+        z-index: 30;
+        background: var(--surface);
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        padding: 0.4rem;
+        min-width: 170px;
+        box-shadow: 0 8px 22px rgba(0, 0, 0, 0.14);
+        display: flex;
+        flex-direction: column;
+        gap: 0.3rem;
+    }
+    .row-menu-panel form { margin: 0; }
+    .row-menu-panel form button, .row-menu-panel > button {
+        width: 100%;
+        text-align: left;
+        font-size: 0.82rem;
+        padding: 0.4rem 0.55rem;
+    }
 </style>
 {% endblock %}
 {% block content %}
+
+{% macro row_actions_menu(p, q) %}
+<details class="row-menu">
+    <summary>Ações ▾</summary>
+    <div class="row-menu-panel">
+        {% if p.sync_enabled %}
+        <form method="post" action="{{ url_for('products_sync_now') }}">
+            <input type="hidden" name="codigo" value="{{ p.codigo }}">
+            <input type="hidden" name="q" value="{{ q or '' }}">
+            <button type="submit" class="btn btn-secondary">Sync agora</button>
+        </form>
+        {% endif %}
+        <button type="button" class="btn btn-secondary js-link-btn"
+                data-codigo="{{ p.codigo }}"
+                data-nome="{{ p.nome }}"
+                data-preco="{{ '%.2f'|format(p.preco|float) }}"
+                data-suggested-label="{{ p.suggested_label or '' }}"
+                data-status='{{ p.link_status|tojson }}'>
+            Vincular…
+        </button>
+        <form method="post" action="{{ url_for('products_unlink') }}"
+              onsubmit="return confirm('Desvincular {{ p.codigo }}? O produto/opção no Compuchat não é apagado, só perde o código UniPlus.');">
+            <input type="hidden" name="codigo" value="{{ p.codigo }}">
+            <input type="hidden" name="q" value="{{ q or '' }}">
+            <button type="submit" class="btn btn-danger">Desvincular</button>
+        </form>
+    </div>
+</details>
+{% endmacro %}
+
 <div class="panel">
     <h2 class="page-title">Produtos UniPlus</h2>
     <p class="page-sub">
-        Clique em <strong>Vincular…</strong> para ligar um código UniPlus a um produto do Compuchat — como produto
-        avulso novo, avulso já existente, ou variação (ex.: tamanho) de um produto pai. Códigos já anexados como
-        variação aparecem recolhidos abaixo do produto pai.
+        Códigos <strong>pendentes</strong> ainda não têm nenhum produto Compuchat associado — clique em
+        <strong>Vincular…</strong> pra ligar como produto avulso ou variação de um produto pai. Códigos
+        <strong>já vinculados</strong> aparecem agrupados por produto Compuchat (evita duplicar o mesmo produto em
+        duas linhas).
     </p>
 
     {% if message %}
@@ -93,72 +216,57 @@
     </div>
     {% endif %}
 
-    <div style="overflow:auto;">
-        <table class="table" style="width:100%; border-collapse:collapse; font-size:0.9rem;">
-            <thead>
-                <tr style="text-align:left; border-bottom:1px solid var(--line); color:var(--muted);">
-                    <th style="padding:0.5rem;">Sync</th>
-                    <th style="padding:0.5rem;">Código</th>
-                    <th style="padding:0.5rem;">Nome</th>
-                    <th style="padding:0.5rem;">Preço</th>
-                    <th style="padding:0.5rem;">Vínculo</th>
-                    <th style="padding:0.5rem;"></th>
-                </tr>
-            </thead>
-            <tbody>
-                {% for row in display_rows %}
-                    {% if row.type == "group" %}
-                    <tr class="group-row" data-group-parent="{{ row.parent.id }}">
-                        <td colspan="6" style="padding:0.55rem;">
-                            <button type="button" class="group-toggle-btn js-group-toggle" data-group="{{ row.parent.id }}">▶</button>
-                            {{ row.parent.name }}
-                            {% if row.parent.grupo %}<span style="color:var(--muted); font-weight:400;"> · {{ row.parent.grupo }}</span>{% endif %}
-                            <span class="badge badge-ok" style="margin-left:0.4rem;">{{ row.children|length }} variação(ões)</span>
-                        </td>
+    <details class="section-toggle" open>
+        <summary>Pendentes de vínculo ({{ pending_count }})</summary>
+
+        {% for cluster in clusters %}
+        <div class="cluster-card">
+            <h4>💡 Parecem ser tamanhos do mesmo produto: {{ cluster.baseName }}</h4>
+            <ul class="cluster-items">
+                {% for item in cluster.codes %}
+                <li>
+                    <span style="font-family:ui-monospace, monospace;">{{ item.codigo }}</span>
+                    — {{ item.nome }} <strong>({{ item.size_label }})</strong>
+                    · R$ {{ '%.2f'|format(item.preco|float) }}
+                </li>
+                {% endfor %}
+            </ul>
+            <form method="post" action="{{ url_for('products_transform_cluster') }}"
+                  onsubmit="return confirm('Criar produto “' + this.nome.value + '” e transformar estes {{ cluster.codes|length }} códigos em variações (tamanho)?');">
+                <input type="hidden" name="q" value="{{ q or '' }}">
+                {% for item in cluster.codes %}
+                <input type="hidden" name="codigos" value="{{ item.codigo }}">
+                <input type="hidden" name="labels" value="{{ item.size_label }}">
+                <input type="hidden" name="precos" value="{{ '%.2f'|format(item.preco|float) }}">
+                {% endfor %}
+                <div class="cluster-form-row">
+                    <div style="flex:1; min-width:200px;">
+                        <label for="clusterNome{{ loop.index }}">Nome do produto</label>
+                        <input type="text" name="nome" id="clusterNome{{ loop.index }}" value="{{ cluster.baseName }}" required style="width:100%;">
+                    </div>
+                    <div style="min-width:170px;">
+                        <label for="clusterGrupo{{ loop.index }}">Grupo (categoria)</label>
+                        <input type="text" name="grupo" id="clusterGrupo{{ loop.index }}" list="gruposDatalist" placeholder="Ex: Pizzas">
+                    </div>
+                    <button type="submit" class="btn">Transformar em variações</button>
+                </div>
+            </form>
+        </div>
+        {% endfor %}
+
+        <div style="overflow:auto;">
+            <table class="table" style="width:100%; border-collapse:collapse; font-size:0.9rem;">
+                <thead>
+                    <tr style="text-align:left; border-bottom:1px solid var(--line); color:var(--muted);">
+                        <th style="padding:0.5rem;">Sync</th>
+                        <th style="padding:0.5rem;">Código</th>
+                        <th style="padding:0.5rem;">Nome</th>
+                        <th style="padding:0.5rem;">Preço</th>
+                        <th style="padding:0.5rem;"></th>
                     </tr>
-                    {% for p in row.children %}
-                    <tr class="group-child" data-group="{{ row.parent.id }}" style="display:none; border-bottom:1px solid var(--line);">
-                        <td style="padding:0.55rem;">
-                            <form method="post" action="{{ url_for('products_toggle') }}" style="margin:0;">
-                                <input type="hidden" name="codigo" value="{{ p.codigo }}">
-                                <input type="hidden" name="q" value="{{ q or '' }}">
-                                <label style="display:inline-flex; align-items:center; gap:0.35rem; cursor:pointer; font-weight:600;">
-                                    <input type="checkbox" name="enabled" value="1" {% if p.sync_enabled %}checked{% endif %}
-                                           onchange="this.form.submit()">
-                                    {% if p.sync_enabled %}ON{% else %}off{% endif %}
-                                </label>
-                            </form>
-                        </td>
-                        <td style="padding:0.55rem; font-family:ui-monospace, monospace;">{{ p.codigo }}</td>
-                        <td style="padding:0.55rem;">{{ p.nome }}{% if p.inativo %}<span style="color:var(--muted); font-size:0.75rem;"> (inativo)</span>{% endif %}</td>
-                        <td style="padding:0.55rem;">R$ {{ '%.2f'|format(p.preco|float) }}</td>
-                        <td style="padding:0.55rem; font-size:0.82rem;">
-                            <span class="badge badge-ok">Opção: {{ p.link_status.optionLabel }}</span>
-                        </td>
-                        <td style="padding:0.55rem; white-space:nowrap;">
-                            <div style="display:flex; gap:0.35rem; flex-wrap:wrap;">
-                                {% if p.sync_enabled %}
-                                <form method="post" action="{{ url_for('products_sync_now') }}" style="margin:0;">
-                                    <input type="hidden" name="codigo" value="{{ p.codigo }}">
-                                    <input type="hidden" name="q" value="{{ q or '' }}">
-                                    <button type="submit" class="btn btn-secondary" style="padding:0.3rem 0.6rem; font-size:0.8rem;">Sync agora</button>
-                                </form>
-                                {% endif %}
-                                <button type="button" class="btn btn-secondary js-link-btn"
-                                        style="padding:0.3rem 0.6rem; font-size:0.8rem;"
-                                        data-codigo="{{ p.codigo }}"
-                                        data-nome="{{ p.nome }}"
-                                        data-preco="{{ '%.2f'|format(p.preco|float) }}"
-                                        data-suggested-label="{{ p.suggested_label or '' }}"
-                                        data-status='{{ p.link_status|tojson }}'>
-                                    Vincular…
-                                </button>
-                            </div>
-                        </td>
-                    </tr>
-                    {% endfor %}
-                    {% else %}
-                    {% set p = row.item %}
+                </thead>
+                <tbody>
+                    {% for p in pending_singles %}
                     <tr style="border-bottom:1px solid var(--line);">
                         <td style="padding:0.55rem;">
                             <form method="post" action="{{ url_for('products_toggle') }}" style="margin:0;">
@@ -174,43 +282,75 @@
                         <td style="padding:0.55rem; font-family:ui-monospace, monospace;">{{ p.codigo }}</td>
                         <td style="padding:0.55rem;">{{ p.nome }}{% if p.inativo %}<span style="color:var(--muted); font-size:0.75rem;"> (inativo)</span>{% endif %}</td>
                         <td style="padding:0.55rem;">R$ {{ '%.2f'|format(p.preco|float) }}</td>
-                        <td style="padding:0.55rem; font-size:0.82rem;">
-                            {% if p.link_status.kind == "standalone" %}
-                            <span class="badge badge-ok">Avulso: {{ p.link_status.productName }}</span>
-                            {% else %}
-                            <span class="badge badge-muted">Não vinculado</span>
-                            {% endif %}
-                        </td>
                         <td style="padding:0.55rem; white-space:nowrap;">
-                            <div style="display:flex; gap:0.35rem; flex-wrap:wrap;">
-                                {% if p.sync_enabled %}
-                                <form method="post" action="{{ url_for('products_sync_now') }}" style="margin:0;">
-                                    <input type="hidden" name="codigo" value="{{ p.codigo }}">
-                                    <input type="hidden" name="q" value="{{ q or '' }}">
-                                    <button type="submit" class="btn btn-secondary" style="padding:0.3rem 0.6rem; font-size:0.8rem;">Sync agora</button>
-                                </form>
-                                {% endif %}
-                                <button type="button" class="btn btn-secondary js-link-btn"
-                                        style="padding:0.3rem 0.6rem; font-size:0.8rem;"
-                                        data-codigo="{{ p.codigo }}"
-                                        data-nome="{{ p.nome }}"
-                                        data-preco="{{ '%.2f'|format(p.preco|float) }}"
-                                        data-suggested-label="{{ p.suggested_label or '' }}"
-                                        data-status='{{ p.link_status|tojson }}'>
-                                    Vincular…
-                                </button>
-                            </div>
+                            <button type="button" class="btn btn-secondary js-link-btn"
+                                    style="padding:0.3rem 0.6rem; font-size:0.8rem;"
+                                    data-codigo="{{ p.codigo }}"
+                                    data-nome="{{ p.nome }}"
+                                    data-preco="{{ '%.2f'|format(p.preco|float) }}"
+                                    data-suggested-label="{{ p.suggested_label or '' }}"
+                                    data-status='{{ p.link_status|tojson }}'>
+                                Vincular…
+                            </button>
                         </td>
                     </tr>
-                    {% endif %}
-                {% else %}
-                <tr>
-                    <td colspan="6" style="padding:1rem; color:var(--muted);">Nenhum produto encontrado.</td>
-                </tr>
+                    {% else %}
+                    <tr>
+                        <td colspan="5" style="padding:1rem; color:var(--muted);">
+                            {% if clusters %}Todos os demais códigos pendentes já entraram em uma sugestão de cluster acima.{% else %}Nenhum código pendente 🎉{% endif %}
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </details>
+
+    <details class="section-toggle">
+        <summary>Já vinculados ({{ linked_cards|length }} produto(s) · {{ linked_codes_count }} código(s))</summary>
+
+        {% for card in linked_cards %}
+        <details class="linked-card">
+            <summary>
+                <span style="flex:1;">
+                    {{ card.productName }}
+                    {% if card.grupo %}<span style="color:var(--muted); font-weight:400;"> · {{ card.grupo }}</span>{% endif %}
+                </span>
+                <span class="badge badge-ok">{{ card.codesCount }} código(s)</span>
+            </summary>
+            <div class="linked-card-body">
+                {% if card.standalone %}
+                <div class="linked-row">
+                    <div class="linked-row-main">
+                        <span class="badge badge-muted" style="margin-right:0.4rem;">Avulso</span>
+                        <span style="font-family:ui-monospace, monospace;">{{ card.standalone.codigo }}</span>
+                        — {{ card.standalone.nome }} · R$ {{ '%.2f'|format(card.standalone.preco|float) }}
+                    </div>
+                    {{ row_actions_menu(card.standalone, q) }}
+                </div>
+                {% endif %}
+                {% for group in card.variations %}
+                <div class="variation-group">
+                    <div class="variation-group-title">{{ group.variationName }} ({{ group.options|length }})</div>
+                    {% for opt in group.options %}
+                    <div class="linked-row">
+                        <div class="linked-row-main">
+                            <span class="badge badge-ok" style="margin-right:0.4rem;">{{ opt.link_status.optionLabel }}</span>
+                            <span style="font-family:ui-monospace, monospace;">{{ opt.codigo }}</span>
+                            — {{ opt.nome }} · R$ {{ '%.2f'|format(opt.preco|float) }}
+                        </div>
+                        {{ row_actions_menu(opt, q) }}
+                    </div>
+                    {% endfor %}
+                </div>
                 {% endfor %}
-            </tbody>
-        </table>
-    </div>
+            </div>
+        </details>
+        {% else %}
+        <p style="color:var(--muted); font-size:0.9rem;">Nenhum código vinculado ainda.</p>
+        {% endfor %}
+    </details>
+
     <p style="margin-top:0.8rem; color:var(--muted); font-size:0.85rem;">
         {{ products|length }} produto(s) listado(s) · {{ enabled_count }} em sync automático
         {% if list_error %}<br><span style="color:var(--danger);">{{ list_error }}</span>{% endif %}
@@ -430,7 +570,14 @@
         return 'Atualmente: variação de "' + status.parentName + '" → ' + status.variationName + ': ' + status.optionLabel + '.';
     }
 
+    function closeAllRowMenus() {
+        document.querySelectorAll('details.row-menu[open]').forEach(function (d) {
+            d.removeAttribute('open');
+        });
+    }
+
     window.openLinkModal = function (btn) {
+        closeAllRowMenus();
         var codigo = btn.getAttribute('data-codigo') || '';
         var nome = btn.getAttribute('data-nome') || '';
         var preco = btn.getAttribute('data-preco') || '0';
@@ -503,13 +650,10 @@
         }
     });
 
-    document.querySelectorAll('.js-group-toggle').forEach(function (btn) {
-        btn.addEventListener('click', function () {
-            var key = btn.getAttribute('data-group');
-            var rows = document.querySelectorAll('tr.group-child[data-group="' + key + '"]');
-            var isHidden = rows.length > 0 && rows[0].style.display === 'none';
-            rows.forEach(function (r) { r.style.display = isHidden ? 'table-row' : 'none'; });
-            btn.textContent = isHidden ? '▼' : '▶';
+    // Fecha o menu "Ações ▾" ao clicar fora dele.
+    document.addEventListener('click', function (e) {
+        document.querySelectorAll('details.row-menu[open]').forEach(function (d) {
+            if (!d.contains(e.target)) d.removeAttribute('open');
         });
     });
 })();
