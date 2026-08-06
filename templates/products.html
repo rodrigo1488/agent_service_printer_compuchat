@@ -24,6 +24,30 @@
     }
     .link-type-options label { display: flex; align-items: center; gap: 0.45rem; font-weight: 600; font-size: 0.88rem; margin-bottom: 0; }
     .link-fieldset { display: flex; flex-direction: column; gap: 0.6rem; margin-bottom: 0.5rem; }
+    .link-fieldset select,
+    .link-fieldset input[type="text"] {
+        width: 100%;
+        padding: 0.5rem 0.6rem;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--surface);
+        color: inherit;
+        box-sizing: border-box;
+    }
+    .addon-create-row { display: flex; flex-direction: column; gap: 0.55rem; }
+    .addon-create-toggle {
+        display: flex;
+        align-items: center;
+        gap: 0.45rem;
+        font-size: 0.85rem;
+        font-weight: 600;
+        margin: 0;
+    }
+    .modal-inline-error {
+        font-size: 0.82rem;
+        color: var(--danger);
+        margin: 0.2rem 0 0;
+    }
     .status-banner {
         font-size: 0.85rem;
         color: var(--muted);
@@ -390,7 +414,7 @@
         <div class="link-fieldset" data-mode="new">
             <div>
                 <label for="newNome">Nome do produto</label>
-                <input type="text" name="nome" id="newNome" required>
+                <input type="text" name="nome" id="newNome">
             </div>
             <div>
                 <label for="newGrupo">Grupo (categoria)</label>
@@ -438,26 +462,37 @@
         </div>
 
         <div class="link-fieldset" data-mode="addon" hidden>
+            {% if addons_error %}
+            <p class="modal-inline-error" id="addonLoadError">
+                Não foi possível carregar grupos de adicionais: {{ addons_error }}
+            </p>
+            {% endif %}
             <div>
-                <label for="addonItem">Adicional</label>
-                <select name="addOnItemId" id="addonItem" style="width:100%; padding:0.5rem 0.6rem; border:1px solid var(--line); border-radius:8px; background:var(--surface); color:inherit;">
-                    <option value="">Selecione um adicional…</option>
-                    {% for group_name, group_items in (addons_catalog or [])|groupby('groupName') %}
-                    <optgroup label="{{ group_name }}">
-                        {% for a in group_items %}
-                        <option value="{{ a.id }}">
-                            {{ a.label }}{% if a.subgroupName %} · {{ a.subgroupName }}{% endif %} — R$ {{ '%.2f'|format(a.value|float) }}
-                        </option>
-                        {% endfor %}
-                    </optgroup>
-                    {% endfor %}
+                <label for="addonGroup">Grupo de adicionais</label>
+                <select name="addOnGroupId" id="addonGroup">
+                    <option value="">Selecione um grupo…</option>
                 </select>
-                {% if not addons_catalog %}
-                <p class="hint" style="margin-top:0.3rem;">
-                    Nenhum adicional cadastrado ainda. Cadastre grupos de adicionais em Compuchat → Adicionais.
-                </p>
-                {% endif %}
             </div>
+            <div id="addonItemRow">
+                <label for="addonItem">Item do grupo</label>
+                <select name="addOnItemId" id="addonItem">
+                    <option value="">Selecione um item…</option>
+                </select>
+            </div>
+            <label class="addon-create-toggle">
+                <input type="checkbox" name="createNewItem" id="addonCreateNew" value="1">
+                Criar novo item neste grupo
+            </label>
+            <div class="addon-create-row" id="addonCreateFields" hidden>
+                <div>
+                    <label for="addonNewLabel">Nome do adicional</label>
+                    <input type="text" name="label" id="addonNewLabel" placeholder="Ex: Borda catupiry">
+                </div>
+                <p class="hint" style="margin:0;">O preço do vínculo usa o valor do produto UniPlus acima.</p>
+            </div>
+            <p class="hint" id="addonEmptyHint" hidden style="margin:0;">
+                Nenhum grupo de adicionais nesta empresa. Cadastre em Compuchat → Adicionais.
+            </p>
         </div>
 
         <div style="display:flex; gap:0.5rem; justify-content:flex-end; margin-top:0.75rem;">
@@ -474,12 +509,16 @@
     {% for parent in parents or [] %}<option value="{{ parent.name }} · {{ parent.grupo or 'Sem grupo' }} (#{{ parent.id }})">{% endfor %}
 </datalist>
 <script type="application/json" id="parentsData">{{ parents|tojson }}</script>
+<script type="application/json" id="addonsGroupsData">{{ (addons_groups or [])|tojson }}</script>
 
 <script>
 (function () {
     var PARENTS = JSON.parse(document.getElementById('parentsData').textContent || '[]');
+    var ADDON_GROUPS = JSON.parse(document.getElementById('addonsGroupsData').textContent || '[]');
     var PARENTS_BY_ID = {};
     PARENTS.forEach(function (p) { PARENTS_BY_ID[p.id] = p; });
+    var GROUPS_BY_ID = {};
+    ADDON_GROUPS.forEach(function (g) { GROUPS_BY_ID[g.id] = g; });
 
     function formatProductOption(p) {
         return p.name + ' · ' + (p.grupo || 'Sem grupo') + ' (#' + p.id + ')';
@@ -487,6 +526,13 @@
     function parseIdFromLabel(text) {
         var m = /\(#(\d+)\)\s*$/.exec(text || '');
         return m ? parseInt(m[1], 10) : null;
+    }
+    function formatAddonItemOption(item) {
+        var label = item.label || '';
+        if (item.subgroupName) label += ' · ' + item.subgroupName;
+        label += ' — R$ ' + Number(item.value || 0).toFixed(2);
+        if (item.idUniplus) label += ' (já: ' + item.idUniplus + ')';
+        return label;
     }
 
     var dlg = document.getElementById('linkModal');
@@ -520,8 +566,59 @@
         variationNamesList: document.getElementById('variationNamesList'),
         optionLabelsList: document.getElementById('optionLabelsList'),
 
+        addonGroup: document.getElementById('addonGroup'),
         addonItem: document.getElementById('addonItem'),
+        addonItemRow: document.getElementById('addonItemRow'),
+        addonCreateNew: document.getElementById('addonCreateNew'),
+        addonCreateFields: document.getElementById('addonCreateFields'),
+        addonNewLabel: document.getElementById('addonNewLabel'),
+        addonEmptyHint: document.getElementById('addonEmptyHint'),
     };
+
+    function populateAddonGroups(selectedGroupId, selectedItemId) {
+        el.addonGroup.innerHTML = '<option value="">Selecione um grupo…</option>';
+        ADDON_GROUPS.forEach(function (g) {
+            var opt = document.createElement('option');
+            opt.value = String(g.id);
+            opt.textContent = g.name + ' (' + ((g.items || []).length) + ' item(ns))';
+            el.addonGroup.appendChild(opt);
+        });
+        el.addonEmptyHint.hidden = ADDON_GROUPS.length > 0 || !!document.getElementById('addonLoadError');
+        if (selectedGroupId) {
+            el.addonGroup.value = String(selectedGroupId);
+        }
+        populateAddonItems(selectedItemId);
+    }
+
+    function populateAddonItems(selectedItemId) {
+        var groupId = parseInt(el.addonGroup.value || '0', 10);
+        var group = GROUPS_BY_ID[groupId];
+        el.addonItem.innerHTML = '<option value="">Selecione um item…</option>';
+        if (!group) return;
+        (group.items || []).forEach(function (item) {
+            var opt = document.createElement('option');
+            opt.value = String(item.id);
+            opt.textContent = formatAddonItemOption(item);
+            el.addonItem.appendChild(opt);
+        });
+        if (selectedItemId) {
+            el.addonItem.value = String(selectedItemId);
+        }
+    }
+
+    function syncAddonCreateMode() {
+        var create = !!el.addonCreateNew.checked;
+        var addonActive = !el.addonGroup.closest('.link-fieldset').hidden;
+        el.addonCreateFields.hidden = !create;
+        el.addonItemRow.hidden = create;
+        el.addonCreateNew.disabled = !addonActive;
+        el.addonGroup.disabled = !addonActive;
+        el.addonItem.disabled = !addonActive || create;
+        el.addonNewLabel.disabled = !addonActive || !create;
+        if (create && !el.addonNewLabel.value) {
+            el.addonNewLabel.value = el.nomeLabel.textContent || '';
+        }
+    }
 
     function setMode(mode) {
         fieldsets.forEach(function (fs) {
@@ -537,6 +634,9 @@
             : mode === 'addon'
                 ? '{{ url_for("products_link_addon") }}'
                 : '{{ url_for("products_link_standalone") }}';
+        if (mode === 'addon') {
+            syncAddonCreateMode();
+        }
     }
 
     radios.forEach(function (r) {
@@ -552,6 +652,11 @@
             el.existingGrupo.value = p.grupo || '';
         }
     });
+
+    el.addonGroup.addEventListener('change', function () {
+        populateAddonItems(null);
+    });
+    el.addonCreateNew.addEventListener('change', syncAddonCreateMode);
 
     function updateOptionsPreview(parent) {
         el.optionLabelsList.innerHTML = '';
@@ -611,6 +716,18 @@
         return 'Atualmente: variação de "' + status.parentName + '" → ' + status.variationName + ': ' + status.optionLabel + '.';
     }
 
+    function findGroupIdForItem(itemId) {
+        var id = Number(itemId);
+        for (var i = 0; i < ADDON_GROUPS.length; i++) {
+            var g = ADDON_GROUPS[i];
+            var items = g.items || [];
+            for (var j = 0; j < items.length; j++) {
+                if (Number(items[j].id) === id) return g.id;
+            }
+        }
+        return null;
+    }
+
     function closeAllRowMenus() {
         document.querySelectorAll('details.row-menu[open]').forEach(function (d) {
             d.removeAttribute('open');
@@ -649,7 +766,16 @@
         el.optionLabelsList.innerHTML = '';
         el.variationNamesList.innerHTML = '';
 
-        el.addonItem.value = '';
+        el.addonCreateNew.checked = false;
+        el.addonNewLabel.value = nome;
+        var preferGroupId = null;
+        var preferItemId = null;
+        if (status.kind === 'addon' && status.addOnItemId) {
+            preferItemId = status.addOnItemId;
+            preferGroupId = findGroupIdForItem(status.addOnItemId);
+        }
+        populateAddonGroups(preferGroupId, preferItemId);
+        syncAddonCreateMode();
 
         var mode = 'new';
         if (status.kind === 'standalone') {
@@ -670,7 +796,6 @@
             refreshVariationDatalists(vp);
         } else if (status.kind === 'addon') {
             mode = 'addon';
-            el.addonItem.value = String(status.addOnItemId || '');
         }
         setMode(mode);
 
@@ -687,15 +812,30 @@
 
     form.addEventListener('submit', function (e) {
         var mode = document.querySelector('input[name="linkType"]:checked').value;
-        if (mode === 'existing' && !el.existingProductId.value) {
+        if (mode === 'new' && !(el.newNome.value || '').trim()) {
+            e.preventDefault();
+            alert('Informe o nome do produto.');
+        } else if (mode === 'existing' && !el.existingProductId.value) {
             e.preventDefault();
             alert('Selecione um produto existente na lista.');
         } else if (mode === 'variation' && !el.variationParentId.value) {
             e.preventDefault();
             alert('Selecione um produto pai na lista.');
-        } else if (mode === 'addon' && !el.addonItem.value) {
-            e.preventDefault();
-            alert('Selecione um adicional na lista.');
+        } else if (mode === 'addon') {
+            if (!el.addonGroup.value) {
+                e.preventDefault();
+                alert('Selecione um grupo de adicionais.');
+                return;
+            }
+            if (el.addonCreateNew.checked) {
+                if (!(el.addonNewLabel.value || '').trim()) {
+                    e.preventDefault();
+                    alert('Informe o nome do novo adicional.');
+                }
+            } else if (!el.addonItem.value) {
+                e.preventDefault();
+                alert('Selecione um item do grupo, ou marque “Criar novo item”.');
+            }
         }
     });
 
@@ -705,6 +845,9 @@
             if (!d.contains(e.target)) d.removeAttribute('open');
         });
     });
+
+    // Popula selects de grupo na carga (template sem options estáticas).
+    populateAddonGroups(null, null);
 })();
 </script>
 {% endblock %}

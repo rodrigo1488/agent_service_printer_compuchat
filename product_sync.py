@@ -331,29 +331,34 @@ def _compuchat_request(
         raise RuntimeError(f"HTTP {e.code}: {detail}") from e
 
 
-def list_compuchat_products(
+def list_compuchat_catalog(
     *, q: str = "", limit: int = 1000
-) -> List[Dict[str, Any]]:
-    """Lista Products Compuchat (para escolher produto pai/avulso e anotar status)."""
+) -> Dict[str, Any]:
+    """Uma única carga de GET /agent/products: products, addOns flat e addOnGroups."""
     data = _compuchat_request(
         "GET",
         "/agent/products",
         query={"q": (q or "").strip(), "limit": str(limit)},
         timeout=30,
     )
-    return list(data.get("products") or [])
+    return {
+        "products": list(data.get("products") or []),
+        "addOns": list(data.get("addOns") or []),
+        "addOnGroups": list(data.get("addOnGroups") or []),
+    }
+
+
+def list_compuchat_products(
+    *, q: str = "", limit: int = 1000
+) -> List[Dict[str, Any]]:
+    """Lista Products Compuchat (para escolher produto pai/avulso e anotar status)."""
+    return list_compuchat_catalog(q=q, limit=limit)["products"]
 
 
 def list_compuchat_addons(*, limit: int = 1000) -> List[Dict[str, Any]]:
     """Lista AddOnItems (adicionais) Compuchat, achatados (grupo/subgrupo já
     resolvidos), pra escolher no modo "Adicional" do modal de vínculo."""
-    data = _compuchat_request(
-        "GET",
-        "/agent/products",
-        query={"limit": str(limit)},
-        timeout=30,
-    )
-    return list(data.get("addOns") or [])
+    return list_compuchat_catalog(limit=limit)["addOns"]
 
 
 def attach_variation_to_parent(
@@ -403,12 +408,26 @@ def link_standalone(
     )
 
 
-def link_addon(*, codigo: str, add_on_item_id: int) -> Dict[str, Any]:
-    """Vincula codigo UniPlus a um adicional (AddOnItem) existente no Compuchat."""
+def link_addon(
+    *,
+    codigo: str,
+    add_on_item_id: Optional[int] = None,
+    add_on_group_id: Optional[int] = None,
+    label: str = "",
+    value: Optional[float] = None,
+) -> Dict[str, Any]:
+    """Vincula codigo UniPlus a um adicional existente, ou cria item num grupo."""
     body: Dict[str, Any] = {
         "codigo": str(codigo or "").strip()[:20],
-        "addOnItemId": int(add_on_item_id),
     }
+    if add_on_item_id:
+        body["addOnItemId"] = int(add_on_item_id)
+    if add_on_group_id:
+        body["addOnGroupId"] = int(add_on_group_id)
+    if (label or "").strip():
+        body["label"] = label.strip()
+    if value is not None:
+        body["value"] = float(value)
     return _compuchat_request(
         "POST", "/agent/products/link-addon", body=body, timeout=45
     )

@@ -400,6 +400,7 @@ def products_page():
     parents = []
     parents_error = None
     addons_catalog = []
+    addons_groups = []
     addons_error = None
     pending_singles = []
     pending_count = 0
@@ -426,12 +427,12 @@ def products_page():
             message = f"Erro ao listar produtos UniPlus: {e}"
             message_type = "error"
         try:
-            parents = product_sync.list_compuchat_products(limit=1000)
+            catalog = product_sync.list_compuchat_catalog(limit=1000)
+            parents = catalog.get("products") or []
+            addons_catalog = catalog.get("addOns") or []
+            addons_groups = catalog.get("addOnGroups") or []
         except Exception as e:
             parents_error = str(e)
-        try:
-            addons_catalog = product_sync.list_compuchat_addons(limit=1000)
-        except Exception as e:
             addons_error = str(e)
         if products:
             product_sync.annotate_link_status(products, parents, addons_catalog)
@@ -454,6 +455,7 @@ def products_page():
         parents=parents,
         parents_error=parents_error,
         addons_catalog=addons_catalog,
+        addons_groups=addons_groups,
         addons_error=addons_error,
         pending_singles=pending_singles,
         pending_count=pending_count,
@@ -527,19 +529,70 @@ def products_link_standalone():
 
 @app.route("/products/link-addon", methods=["POST"])
 def products_link_addon():
-    """Vincula codigo UniPlus a um adicional (AddOnItem) existente no Compuchat."""
+    """Vincula codigo UniPlus a um adicional existente ou cria item em grupo."""
     import product_sync
 
     codigo = (request.form.get("codigo") or "").strip()
     q = (request.form.get("q") or "").strip()
     add_on_item_id_raw = (request.form.get("addOnItemId") or "").strip()
+    add_on_group_id_raw = (request.form.get("addOnGroupId") or "").strip()
+    label = (request.form.get("label") or "").strip()
+    preco_raw = (request.form.get("preco") or "").strip()
+    create_new = (request.form.get("createNewItem") or "").strip() in (
+        "1",
+        "true",
+        "on",
+        "yes",
+    )
 
     try:
-        if not codigo or not add_on_item_id_raw:
-            raise RuntimeError("Selecione o adicional para vincular")
-        add_on_item_id = int(add_on_item_id_raw)
-        result = product_sync.link_addon(codigo=codigo, add_on_item_id=add_on_item_id)
-        msg = f"Adicional vinculado: {codigo} → \"{result.get('label')}\" (#{result.get('addOnItemId')})"
+        preco = float(preco_raw) if preco_raw else 0.0
+    except ValueError:
+        preco = 0.0
+
+    try:
+        if not codigo:
+            raise RuntimeError("Informe o codigo UniPlus")
+
+        add_on_item_id = None
+        add_on_group_id = None
+        if add_on_item_id_raw and not create_new:
+            try:
+                add_on_item_id = int(add_on_item_id_raw)
+            except ValueError:
+                add_on_item_id = None
+        if add_on_group_id_raw:
+            try:
+                add_on_group_id = int(add_on_group_id_raw)
+            except ValueError:
+                add_on_group_id = None
+
+        if create_new:
+            if not add_on_group_id:
+                raise RuntimeError("Selecione o grupo de adicionais")
+            if not label:
+                raise RuntimeError("Informe o nome do novo adicional")
+            result = product_sync.link_addon(
+                codigo=codigo,
+                add_on_group_id=add_on_group_id,
+                label=label,
+                value=preco,
+            )
+            msg = (
+                f"Adicional criado e vinculado: {codigo} → "
+                f"\"{result.get('label')}\" (#{result.get('addOnItemId')})"
+            )
+        else:
+            if not add_on_item_id:
+                raise RuntimeError("Selecione o adicional para vincular")
+            result = product_sync.link_addon(
+                codigo=codigo, add_on_item_id=add_on_item_id
+            )
+            msg = (
+                f"Adicional vinculado: {codigo} → "
+                f"\"{result.get('label')}\" (#{result.get('addOnItemId')})"
+            )
+
         if result.get("removedProductId"):
             msg += f" · desvinculado produto #{result.get('removedProductId')}"
         if result.get("clearedOptionIds"):
