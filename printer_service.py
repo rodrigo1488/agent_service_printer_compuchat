@@ -178,6 +178,13 @@ class PrinterService:
                     addon_str = f" R$ {addon_val:.2f}".replace(".", ",")
                     addon_one = ("  + " + addon_label)[:W - len(addon_str)].ljust(W - len(addon_str)) + addon_str
                     lines.append(addon_one[:W])
+                # Observação do cliente (quebra em múltiplas linhas se necessário)
+                obs = (item.get('observation') or '').strip()
+                if obs:
+                    obs_text = "  Obs: " + obs
+                    while obs_text:
+                        lines.append(obs_text[:W])
+                        obs_text = ("    " + obs_text[W:]) if len(obs_text) > W else ""
 
             lines.append("")
 

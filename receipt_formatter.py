@@ -75,6 +75,7 @@ def format_order_receipt(data: dict) -> dict:
             "value": value,
             "total": item_total,
             "addons": addons_list,
+            "observation": str(item.get("observation") or item.get("observacao") or "").strip(),
         })
 
     custom_info = {}
