@@ -171,6 +171,15 @@ class PrinterService:
                     right_part = right_part.rjust(14)
                 line = (name_one_line[:name_width].ljust(name_width)) + right_part
                 lines.append(line[:W])
+                # Integrantes do combo
+                for ci in item.get('combo_items') or []:
+                    ci_name = (ci.get('name') or 'Item').strip()
+                    ci_qty = int(ci.get('quantity') or 1)
+                    ci_val = float(ci.get('value') or 0)
+                    ci_label = f"  > {ci_qty}x {ci_name}" if ci_qty > 1 else f"  > {ci_name}"
+                    ci_str = f" R$ {ci_val:.2f}".replace(".", ",")
+                    ci_one = ci_label[:W - len(ci_str)].ljust(W - len(ci_str)) + ci_str
+                    lines.append(ci_one[:W])
                 # Adicionais com valor
                 for addon in addons:
                     addon_label = (addon.get('label') or 'Adicional').strip()

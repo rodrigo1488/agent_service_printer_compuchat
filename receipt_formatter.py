@@ -69,12 +69,27 @@ def format_order_receipt(data: dict) -> dict:
             addon_val = float(a.get("value", 0) or 0)
             addons_list.append({"label": str(label), "value": addon_val})
 
+        combo_raw = item.get("comboItems") or item.get("combo_items") or []
+        combo_list = []
+        for ci in combo_raw if isinstance(combo_raw, list) else []:
+            if not isinstance(ci, dict):
+                continue
+            ci_name = ci.get("productName") or ci.get("product_name") or "Item"
+            ci_qty = int(ci.get("quantity") or 1)
+            ci_val = float(ci.get("value") or 0)
+            combo_list.append({"name": str(ci_name), "quantity": ci_qty, "value": ci_val})
+
+        name = item.get("productName") or "Produto"
+        if item.get("type") == "combo" and "combo" not in str(name).lower():
+            name = f"{name} (Combo)"
+
         items_by_group[grupo].append({
-            "name": item.get("productName") or "Produto",
+            "name": name,
             "quantity": quantity,
             "value": value,
             "total": item_total,
             "addons": addons_list,
+            "combo_items": combo_list,
             "observation": str(item.get("observation") or item.get("observacao") or "").strip(),
         })
 
