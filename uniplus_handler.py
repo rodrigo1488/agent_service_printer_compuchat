@@ -6,7 +6,7 @@ import re
 import uuid
 import unicodedata
 from datetime import datetime, timezone
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, Optional, Set, Tuple
 
 logger = logging.getLogger("uniplus")
 
@@ -24,6 +24,8 @@ except ImportError:
 _IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 CONNECT_TIMEOUT_SEC = 8
 STATEMENT_TIMEOUT_MS = 15000
+# Fallback CONTAMESAITEM.idunidademedida quando o produto UniPlus não tem unidade
+DEFAULT_IDUNIDADEMEDIDA = 30
 
 
 class UniplusPermanentError(RuntimeError):
@@ -126,9 +128,18 @@ def validate_uniplus_connection(
 
 
 def _connect(dsn: str):
+    """Abre conexão curta. Sempre fechar no finally do caller — Unico não tolera sessão concorrente."""
     conn = psycopg2.connect(dsn, connect_timeout=CONNECT_TIMEOUT_SEC)
     with conn.cursor() as cur:
         cur.execute(f"SET statement_timeout = {int(STATEMENT_TIMEOUT_MS)}")
+        try:
+            cur.execute('SET search_path TO public, unico, "$user"')
+        except Exception:
+            pass
+        try:
+            cur.execute("SET application_name = 'compuchat_print_agent'")
+        except Exception:
+            pass
     return conn
 
 
@@ -162,6 +173,41 @@ def _produto_nome_column(cur, table: str) -> str:
         if preferred in cols:
             return preferred
     return ""
+
+
+def _produto_has_column(cur, table: str, column: str) -> bool:
+    cur.execute(
+        """
+        SELECT 1
+        FROM information_schema.columns
+        WHERE lower(table_name) = lower(%s)
+          AND table_schema NOT IN ('pg_catalog', 'information_schema')
+          AND lower(column_name) = lower(%s)
+        LIMIT 1
+        """,
+        (table, column),
+    )
+    return bool(cur.fetchone())
+
+
+def _fetch_produto_unidademedida(cur, table: str, id_col: str, produto_id: int) -> int:
+    """Retorna idunidademedida do produto; fallback DEFAULT_IDUNIDADEMEDIDA (30)."""
+    if not _produto_has_column(cur, table, "idunidademedida"):
+        return DEFAULT_IDUNIDADEMEDIDA
+    cur.execute(
+        f"SELECT idunidademedida FROM {table} WHERE {id_col} = %s LIMIT 1",
+        (produto_id,),
+    )
+    row = cur.fetchone()
+    if not row:
+        return DEFAULT_IDUNIDADEMEDIDA
+    val = row["idunidademedida"] if isinstance(row, dict) else row[0]
+    if val is None:
+        return DEFAULT_IDUNIDADEMEDIDA
+    try:
+        return int(val)
+    except (TypeError, ValueError):
+        return DEFAULT_IDUNIDADEMEDIDA
 
 
 def _resolve_produto_id(
@@ -249,6 +295,104 @@ def _resolve_produto_id(
     raise UniplusPermanentError(
         f"ERR_UNIPLUS_PRODUCT_NOT_FOUND: codigo={codigo or '-'} nome={nome or '-'} "
         "(valide o campo codigo do UniPlus, não o id interno)"
+    )
+
+
+def _blank_hash40() -> str:
+    return " " * 40
+
+
+def _insert_contamesaitem(
+    cur,
+    item_table: str,
+    item_cols: Set[str],
+    *,
+    conta_id: int,
+    numeromesa: int,
+    idproduto: int,
+    codigo: str,
+    nome: str,
+    qty: float,
+    precounitario: float,
+    valortotal: float,
+    observacao: str,
+    protocol_key: str,
+    item_hash: str,
+    data_val: Any,
+    hora_abertura: Any,
+    now: datetime,
+    idunidademedida: int,
+    cnpjfilial: str,
+) -> None:
+    """INSERT item alinhado ao padrão nativo do UniPlus (defaults não-NULL)."""
+    row: Dict[str, Any] = {
+        "idcontamesa": conta_id,
+        "idproduto": idproduto,
+        "quantidade": qty,
+        "precounitario": precounitario,
+        "valortotal": valortotal,
+        "valorliquido": valortotal,
+        "cancelado": 0,
+        "canceladoantesdeconfirmar": 0,
+        "observacao": (observacao or "")[:255],
+        "codigoproduto": codigo[:20],
+        "codigoprodutodigitado": codigo[:20],
+        "nomeproduto": nome,
+        "unidademedida": "UN",
+        "idunidademedida": int(idunidademedida or DEFAULT_IDUNIDADEMEDIDA),
+        "orderidintegracao": protocol_key,
+        "tipointegracao": 0,
+        "confirmado": 1,
+        "hash": item_hash,
+        "hashop": _blank_hash40(),
+        "hashkit": _blank_hash40(),
+        "hashimpressao": 0,
+        "data": data_val,
+        "horaabertura": hora_abertura,
+        "datahoralancamento": now.isoformat(),
+        "currenttimemillis": int(now.timestamp() * 1000),
+        "numeroconta": numeromesa,
+        "decimaisquantidade": 0,
+        "decimaispreco": 2,
+        "imprimir": 1,
+        "kit": 0,
+        "lancamentoautomatico": 0,
+        "mesatransferida": 0,
+        "fatorconversao": 1.0,
+        "descontomanual": 0,
+        "descontopromocao": 0.0,
+        "descontounitario": 0.0,
+        "entregue": 0,
+        "idgrupo": 0,
+        "couvertartistico": 0,
+        "naocobrartaxaservico": 0,
+        "taxaservico": 0,
+        "valortaxaservico": 0.0,
+        "nummaxcombinacao": 0,
+        "pauta": 0,
+        "precoalterado": 0,
+        "prontonaop": 0,
+        "quantidadeimpressa": 0.0,
+        "quantidadepaga": 0.0,
+        "tiporodizio": 0,
+        "truncarpreco": 1,
+        "vendainteiragourmet": 0,
+        "motivocancelamento": "",
+        "supervisorcancelamento": "",
+        "usuariocancelamento": "",
+        "cnpjfilial": (cnpjfilial or "")[:18],
+    }
+
+    cols = [c for c in row.keys() if c in item_cols]
+    if "idcontamesa" not in cols or "idproduto" not in cols:
+        raise RuntimeError(
+            f"ERR_UNIPLUS_SCHEMA: {item_table} sem idcontamesa/idproduto"
+        )
+    values = [row[c] for c in cols]
+    placeholders = ",".join(["%s"] * len(cols))
+    cur.execute(
+        f"INSERT INTO {item_table} ({', '.join(cols)}) VALUES ({placeholders})",
+        tuple(values),
     )
 
 
@@ -416,8 +560,17 @@ def _insert_contamesa(
     hash_val: str,
     now: datetime,
     include_optional: bool,
+    table_cols: Optional[Set[str]] = None,
 ) -> int:
     """INSERT CONTAMESA. include_optional controla statusagendamento/pautaunica."""
+    cliente = str(
+        contamesa.get("nomecliente")
+        or contamesa.get("nome")
+        or "Cliente"
+    )[:60]
+    hora_abert = contamesa.get("horaabertura") or now.isoformat()
+    hora_pedido = contamesa.get("horapedidoefetuado") or hora_abert
+
     base_cols = [
         "tipopedido", "status", "situacao", "numeromesa",
         "idfilial", "idusuario", "idcliente", "codigocliente",
@@ -443,7 +596,7 @@ def _insert_contamesa(
         int(contamesa.get("idusuario") or 1),
         int(contamesa.get("idcliente") or 0),
         str(contamesa.get("codigocliente") or "")[:14],
-        str(contamesa.get("nomecliente") or "Cliente")[:60],
+        cliente,
         str(contamesa.get("telefone") or "")[:20],
         str(contamesa.get("documento") or "")[:18],
         str(contamesa.get("endereco") or "")[:60],
@@ -473,14 +626,37 @@ def _insert_contamesa(
         float(contamesa.get("desconto") or 0),
         str(contamesa.get("obs") or "")[:255],
         contamesa.get("data") or now.date().isoformat(),
-        contamesa.get("horaabertura") or now.isoformat(),
-        contamesa.get("horaultimoconsumo") or now.isoformat(),
+        hora_abert,
+        contamesa.get("horaultimoconsumo") or hora_abert,
         int(contamesa.get("currenttimemillis") or int(now.timestamp() * 1000)),
         int(contamesa.get("timestampalteracao") or int(now.timestamp() * 1000)),
     ]
 
     cols = list(base_cols)
     values = list(base_values)
+
+    # Unico lista delivery pelo campo `nome` (além de nomecliente).
+    known_cols = table_cols or set()
+    if not known_cols or "nome" in known_cols:
+        cols.append("nome")
+        values.append(cliente)
+    if not known_cols or "horapedidoefetuado" in known_cols:
+        cols.append("horapedidoefetuado")
+        values.append(hora_pedido)
+    # Inserção nativa UniPlus usa abertaoffline=1
+    if not known_cols or "abertaoffline" in known_cols:
+        cols.append("abertaoffline")
+        values.append(
+            int(
+                contamesa.get("abertaoffline")
+                if contamesa.get("abertaoffline") is not None
+                else 1
+            )
+        )
+    if (not known_cols or "cnpjfilial" in known_cols) and contamesa.get("cnpjfilial"):
+        cols.append("cnpjfilial")
+        values.append(str(contamesa.get("cnpjfilial") or "")[:18])
+
     if include_optional:
         cols.extend(["statusagendamento", "pautaunica"])
         values.append(int(contamesa.get("statusagendamento") or 3))
@@ -593,6 +769,7 @@ def handle_uniplus_job(db_module, conteudo: Dict[str, Any]) -> Dict[str, Any]:
                             hash_val,
                             now,
                             include_optional=include_optional,
+                            table_cols=cols,
                         )
                         cur.execute("RELEASE SAVEPOINT uniplus_ins")
                         last_exc = None
@@ -619,6 +796,7 @@ def handle_uniplus_job(db_module, conteudo: Dict[str, Any]) -> Dict[str, Any]:
                                     hash_val,
                                     now,
                                     include_optional=False,
+                                    table_cols=cols,
                                 )
                                 cur.execute("RELEASE SAVEPOINT uniplus_ins")
                                 last_exc = None
@@ -658,7 +836,9 @@ def handle_uniplus_job(db_module, conteudo: Dict[str, Any]) -> Dict[str, Any]:
                     )
 
                 item_cols = _table_columns(cur, item_table)
-                item_has_hash = "hash" in item_cols
+                cnpjfilial = str(contamesa.get("cnpjfilial") or "").strip()
+                data_val = contamesa.get("data") or now.date().isoformat()
+                hora_abert = contamesa.get("horaabertura") or now.isoformat()
 
                 inserted_items = []
                 for item in itens:
@@ -681,86 +861,40 @@ def handle_uniplus_job(db_module, conteudo: Dict[str, Any]) -> Dict[str, Any]:
                     valortotal = float(item.get("valortotal") or (precounitario * qty))
                     # contamesitem_uk1 UNIQUE(hash) — hash vazio/espaço colide no Unichef
                     item_hash = _pad_hash(str(item.get("hash") or ""))
-                    if item_has_hash:
-                        cur.execute(
-                            f"""
-                            INSERT INTO {item_table} (
-                                idcontamesa, idproduto, quantidade, precounitario, valortotal,
-                                cancelado, observacao, codigoproduto, nomeproduto, unidademedida,
-                                orderidintegracao, tipointegracao, confirmado, hash,
-                                data, horaabertura, datahoralancamento, currenttimemillis,
-                                numeroconta, decimaisquantidade, decimaispreco
-                            ) VALUES (
-                                %s,%s,%s,%s,%s,
-                                0,%s,%s,%s,%s,
-                                %s,0,1,%s,
-                                %s,%s,%s,%s,
-                                %s,0,2
-                            )
-                            """,
-                            (
-                                conta_id,
-                                idproduto,
-                                qty,
-                                precounitario,
-                                valortotal,
-                                str(item.get("observacao") or "")[:255],
-                                codigo[:20],
-                                nome,
-                                str(item.get("unidademedida") or "UN")[:6],
-                                protocol_key,
-                                item_hash,
-                                contamesa.get("data") or now.date().isoformat(),
-                                contamesa.get("horaabertura") or now.isoformat(),
-                                now.isoformat(),
-                                int(now.timestamp() * 1000),
-                                numeromesa,
-                            ),
-                        )
-                    else:
-                        cur.execute(
-                            f"""
-                            INSERT INTO {item_table} (
-                                idcontamesa, idproduto, quantidade, precounitario, valortotal,
-                                cancelado, observacao, codigoproduto, nomeproduto, unidademedida,
-                                orderidintegracao, tipointegracao, confirmado,
-                                data, horaabertura, datahoralancamento, currenttimemillis,
-                                numeroconta, decimaisquantidade, decimaispreco
-                            ) VALUES (
-                                %s,%s,%s,%s,%s,
-                                0,%s,%s,%s,%s,
-                                %s,0,1,
-                                %s,%s,%s,%s,
-                                %s,0,2
-                            )
-                            """,
-                            (
-                                conta_id,
-                                idproduto,
-                                qty,
-                                precounitario,
-                                valortotal,
-                                str(item.get("observacao") or "")[:255],
-                                codigo[:20],
-                                nome,
-                                str(item.get("unidademedida") or "UN")[:6],
-                                protocol_key,
-                                contamesa.get("data") or now.date().isoformat(),
-                                contamesa.get("horaabertura") or now.isoformat(),
-                                now.isoformat(),
-                                int(now.timestamp() * 1000),
-                                numeromesa,
-                            ),
-                        )
+                    id_un = _fetch_produto_unidademedida(
+                        cur, cfg["produto_table"], cfg["produto_id_column"], idproduto
+                    )
+                    _insert_contamesaitem(
+                        cur,
+                        item_table,
+                        item_cols,
+                        conta_id=conta_id,
+                        numeromesa=numeromesa,
+                        idproduto=idproduto,
+                        codigo=codigo,
+                        nome=nome or codigo,
+                        qty=qty,
+                        precounitario=precounitario,
+                        valortotal=valortotal,
+                        observacao=str(item.get("observacao") or ""),
+                        protocol_key=protocol_key,
+                        item_hash=item_hash,
+                        data_val=data_val,
+                        hora_abertura=hora_abert,
+                        now=now,
+                        idunidademedida=id_un,
+                        cnpjfilial=cnpjfilial,
+                    )
                     inserted_items.append(
                         {
                             "codigo": codigo[:20],
                             "nome": nome,
                             "idproduto": idproduto,
+                            "idunidademedida": id_un,
                             "qtd": qty,
                             "precounitario": precounitario,
                             "total": valortotal,
-                            "hash": item_hash if item_has_hash else None,
+                            "hash": item_hash if "hash" in item_cols else None,
                         }
                     )
 

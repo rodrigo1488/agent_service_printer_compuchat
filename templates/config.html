@@ -163,11 +163,19 @@
             <h3 style="margin-bottom: 0.4rem;">UniPlus Gourmet</h3>
             <p class="hint" style="margin-bottom: 0.85rem;">
                 Quando o Compuchat enviar <code>uniplus_job</code>, o agente grava a entrega em CONTAMESA/CONTAMESAITEM.
+                O Unico costuma recusar abrir se houver outra sessão no Postgres — por isso o Agent só conecta sob demanda.
             </p>
             <div class="form-group check-row">
                 <input type="checkbox" id="uniplus_enabled" name="uniplus_enabled" value="on" {% if uniplus_enabled %}checked{% endif %}>
                 <label for="uniplus_enabled">Ativar UniPlus neste agente</label>
             </div>
+            <div class="form-group check-row">
+                <input type="checkbox" id="uniplus_product_sync_poll" name="uniplus_product_sync_poll" value="on" {% if uniplus_product_sync_poll %}checked{% endif %}>
+                <label for="uniplus_product_sync_poll">Poll automático de preço/nome (a cada 30s)</label>
+            </div>
+            <p class="hint" style="margin-top:-0.35rem; margin-bottom:0.85rem;">
+                Deixe <strong>desligado</strong> no dia a dia com o Unico aberto. Use “Sincronizar todos / Sync agora” na tela Produtos quando precisar.
+            </p>
             <div class="form-group">
                 <label for="uniplus_connection_string">Connection string Postgres</label>
                 <input type="text" id="uniplus_connection_string" name="uniplus_connection_string"

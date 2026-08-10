@@ -122,10 +122,11 @@
         <dd>
             {% if health.uniplus and health.uniplus.enabled %}
             <span class="badge badge-ok">Ativo</span>
-            {% if health.uniplus.db_ok %}
-            <span class="badge badge-ok">Postgres OK</span>
+            <span class="badge badge-muted">conexão sob demanda</span>
+            {% if health.uniplus.product_sync_poll %}
+            <span class="badge badge-error">poll produtos ON</span>
             {% else %}
-            <span class="badge badge-error">Postgres falhou</span>
+            <span class="badge badge-ok">poll produtos OFF</span>
             {% endif %}
             {% else %}
             <span class="badge badge-muted">Desligado</span>

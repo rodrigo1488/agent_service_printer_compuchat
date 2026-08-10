@@ -14,4 +14,6 @@ agent.db
 # Build PyInstaller
 dist/
 build/
+# PrintAgent.spec é versionado (usado por build.bat)
 *.spec
+!PrintAgent.spec

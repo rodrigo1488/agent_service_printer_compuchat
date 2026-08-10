@@ -1,0 +1,61 @@
+# -*- mode: python ; coding: utf-8 -*-
+# Spec versionado para build.bat / CI. Gerar: pyinstaller --noconfirm PrintAgent.spec
+
+a = Analysis(
+    ['app.py'],
+    pathex=[],
+    binaries=[],
+    datas=[('templates', 'templates')],
+    hiddenimports=[
+        'websocket',
+        'pystray',
+        'PIL',
+        'PIL.Image',
+        'PIL.ImageDraw',
+        'psycopg2',
+        'flask',
+        'flask_cors',
+        'uniplus_handler',
+        'product_sync',
+        'agent',
+        'db',
+        'printer_service',
+        'receipt_formatter',
+        'error_recovery',
+        'tray',
+        # Windows (ignorados no Linux se o pacote não existir)
+        'win32print',
+        'win32api',
+        'win32timezone',
+        'pythoncom',
+        'pywintypes',
+    ],
+    hookspath=[],
+    hooksconfig={},
+    runtime_hooks=[],
+    excludes=[],
+    noarchive=False,
+    optimize=0,
+)
+pyz = PYZ(a.pure)
+
+exe = EXE(
+    pyz,
+    a.scripts,
+    a.binaries,
+    a.datas,
+    [],
+    name='PrintAgent',
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=True,
+    upx_exclude=[],
+    runtime_tmpdir=None,
+    console=False,
+    disable_windowed_traceback=False,
+    argv_emulation=False,
+    target_arch=None,
+    codesign_identity=None,
+    entitlements_file=None,
+)
