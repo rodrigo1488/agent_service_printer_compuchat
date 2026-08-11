@@ -157,6 +157,11 @@ class PrinterService:
 
             for item in items:
                 name = (item.get('name') or 'Item').strip()
+                half_lines = item.get('half_lines') or []
+                is_half = item.get('type') == 'halfAndHalf' or bool(half_lines)
+                # Meio a meio: título curto; sabores em linhas próprias (evita corte "..")
+                if is_half:
+                    name = "MEIO A MEIO"
                 name_one_line = (name[: name_width - 2] + "..") if len(name) > name_width else name
                 qty = item.get('quantity', 1) or 1
                 addons = item.get('addons') or []
@@ -171,6 +176,11 @@ class PrinterService:
                     right_part = right_part.rjust(14)
                 line = (name_one_line[:name_width].ljust(name_width)) + right_part
                 lines.append(line[:W])
+                # Metades do meio a meio (ex.: 1/2 PIZZA DE PRESUNTO)
+                for half_name in half_lines:
+                    half_text = f"  {str(half_name).strip()}"
+                    for wrap_line in _wrap_text_by_words(half_text, W) or [half_text[:W]]:
+                        lines.append(wrap_line[:W])
                 # Integrantes do combo
                 for ci in item.get('combo_items') or []:
                     ci_name = (ci.get('name') or 'Item').strip()

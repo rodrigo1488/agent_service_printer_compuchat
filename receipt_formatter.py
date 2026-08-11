@@ -80,7 +80,30 @@ def format_order_receipt(data: dict) -> dict:
             combo_list.append({"name": str(ci_name), "quantity": ci_qty, "value": ci_val})
 
         name = item.get("productName") or "Produto"
-        if item.get("type") == "combo" and "combo" not in str(name).lower():
+        item_type = str(item.get("type") or "").strip()
+        half_lines = []
+
+        if item_type == "halfAndHalf":
+            h1 = str(item.get("half1Name") or item.get("half1_name") or "").strip()
+            h2 = str(item.get("half2Name") or item.get("half2_name") or "").strip()
+            if (not h1 or not h2) and name:
+                # Fallback: "Meio a meio: Sabor A / Sabor B"
+                raw = name
+                for prefix in ("Meio a meio:", "MEIO A MEIO:", "meio a meio:"):
+                    if raw.lower().startswith(prefix.lower()):
+                        raw = raw[len(prefix):].strip()
+                        break
+                if " / " in raw:
+                    parts = [p.strip() for p in raw.split(" / ", 1)]
+                    if len(parts) == 2:
+                        h1 = h1 or parts[0]
+                        h2 = h2 or parts[1]
+            if h1:
+                half_lines.append(f"1/2 {h1.upper()}")
+            if h2:
+                half_lines.append(f"1/2 {h2.upper()}")
+            name = "MEIO A MEIO"
+        elif item_type == "combo" and "combo" not in str(name).lower():
             name = f"{name} (Combo)"
 
         items_by_group[grupo].append({
@@ -90,6 +113,8 @@ def format_order_receipt(data: dict) -> dict:
             "total": item_total,
             "addons": addons_list,
             "combo_items": combo_list,
+            "half_lines": half_lines,
+            "type": item_type,
             "observation": str(item.get("observation") or item.get("observacao") or "").strip(),
         })
 
