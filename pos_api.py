@@ -12,6 +12,7 @@ from flask import Blueprint, jsonify, request, send_file
 import db
 from pos_catalog import media_dir, sync_catalog_from_cloud
 from uniplus_handler import (
+    get_open_mesa_conta,
     handle_uniplus_job,
     is_uniplus_enabled,
     list_open_contas,
@@ -272,6 +273,18 @@ def _mesas_com_status_uniplus() -> List[Dict[str, Any]]:
 @_require_pos_token
 def pos_mesas():
     return jsonify({"mesas": _mesas_com_status_uniplus()})
+
+
+@pos_bp.route("/pos/conta", methods=["GET"])
+@_require_pos_token
+def pos_conta():
+    numeromesa = parse_numeromesa(request.args.get("numeromesa"))
+    if not numeromesa:
+        return jsonify({"error": "numeromesa_required"}), 400
+    try:
+        return jsonify(get_open_mesa_conta(db, numeromesa))
+    except Exception as exc:
+        return jsonify({"error": str(exc), "open": False, "itens": []}), 502
 
 
 @pos_bp.route("/pos/mesas/<int:mesa_id>/ocupar", methods=["POST"])

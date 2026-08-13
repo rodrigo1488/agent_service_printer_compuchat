@@ -159,6 +159,84 @@ def list_open_contas(
         conn.close()
 
 
+def get_open_mesa_conta(db_module, numeromesa: int) -> Dict[str, Any]:
+    """Resumo da conta de mesa aberta (tipopedido=1). Delivery no mesmo número é ignorado."""
+    empty = {
+        "open": False,
+        "numeromesa": int(numeromesa),
+        "cliente": "",
+        "valortotal": 0.0,
+        "itens": [],
+    }
+    if not is_uniplus_enabled(db_module) or psycopg2 is None:
+        return empty
+    cfg = _cfg(db_module)
+    conn = _connect(cfg["connection_string"])
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            mesa_table = cfg["contamesa_table"]
+            item_table = cfg["contamesaitem_table"]
+            cols = _table_columns(cur, mesa_table)
+            cliente_expr = "NULL"
+            if "nomecliente" in cols:
+                cliente_expr = "nomecliente"
+            elif "nome" in cols:
+                cliente_expr = "nome"
+            total_expr = "valortotal" if "valortotal" in cols else "0"
+            where = "numeromesa = %s AND status = 1"
+            params: List[Any] = [int(numeromesa)]
+            if "tipopedido" in cols:
+                where += " AND tipopedido = 1"
+            cur.execute(
+                f"""
+                SELECT id, numeromesa, {cliente_expr} AS cliente, {total_expr} AS valortotal
+                FROM {mesa_table}
+                WHERE {where}
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                params,
+            )
+            row = cur.fetchone()
+            if not row:
+                return empty
+            conta_id = int(row["id"])
+            item_cols = _table_columns(cur, item_table)
+            item_where = "idcontamesa = %s"
+            if "cancelado" in item_cols:
+                item_where += " AND COALESCE(cancelado, 0) = 0"
+            nome_col = "nomeproduto" if "nomeproduto" in item_cols else "''"
+            qtd_col = "quantidade" if "quantidade" in item_cols else "1"
+            tot_col = "valortotal" if "valortotal" in item_cols else "0"
+            cur.execute(
+                f"""
+                SELECT {nome_col} AS nomeproduto, {qtd_col} AS quantidade, {tot_col} AS valortotal
+                FROM {item_table}
+                WHERE {item_where}
+                ORDER BY id
+                """,
+                (conta_id,),
+            )
+            itens = []
+            for it in cur.fetchall() or []:
+                itens.append(
+                    {
+                        "nomeproduto": str(it.get("nomeproduto") or "").strip(),
+                        "quantidade": float(it.get("quantidade") or 0),
+                        "valortotal": float(it.get("valortotal") or 0),
+                    }
+                )
+            return {
+                "open": True,
+                "numeromesa": int(row["numeromesa"] or numeromesa),
+                "cliente": str(row.get("cliente") or "").strip(),
+                "valortotal": float(row.get("valortotal") or 0),
+                "itens": itens,
+            }
+    finally:
+        conn.close()
+
+
 def is_uniplus_enabled(db_module) -> bool:
     enabled = (db_module.get_config("uniplus_enabled") or "false").lower()
     dsn = (db_module.get_config("uniplus_connection_string") or "").strip()
