@@ -8,7 +8,12 @@ import urllib.request
 from typing import Any, Dict, Optional
 
 import db
-from product_sync import _api_base_from_ws, _compuchat_request, _device_auth
+from product_sync import (
+    _api_base_from_ws,
+    _compuchat_request,
+    _device_auth,
+    _ssl_unverified_context,
+)
 
 logger = logging.getLogger("pos_catalog")
 
@@ -28,7 +33,9 @@ def fetch_cloud_catalog() -> Dict[str, Any]:
 
 def _download_image(url: str, dest: str) -> None:
     req = urllib.request.Request(url, headers={"User-Agent": "Compuchat-PrintAgent"})
-    with urllib.request.urlopen(req, timeout=20) as resp:
+    with urllib.request.urlopen(
+        req, timeout=20, context=_ssl_unverified_context()
+    ) as resp:
         data = resp.read()
     tmp = dest + ".tmp"
     with open(tmp, "wb") as fh:

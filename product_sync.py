@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import ssl
 import threading
 import time
 import unicodedata
@@ -20,6 +21,13 @@ from uniplus_handler import (
 )
 
 logger = logging.getLogger("product_sync")
+
+
+def _ssl_unverified_context() -> ssl.SSLContext:
+    """Mesmo critério do WebSocket: cert autoassinado/cadeia incompleta no SaaS."""
+    ctx = ssl._create_unverified_context()
+    ctx.check_hostname = False
+    return ctx
 
 # Intervalo alto de propósito — poll contínuo conflita com o Unico no mesmo Postgres.
 POLL_INTERVAL_SEC = 300
@@ -323,7 +331,9 @@ def _compuchat_request(
         headers["Content-Type"] = "application/json"
     req = urllib.request.Request(url, data=data, method=method, headers=headers)
     try:
-        with urllib.request.urlopen(req, timeout=max(15, int(timeout))) as resp:
+        with urllib.request.urlopen(
+            req, timeout=max(15, int(timeout)), context=_ssl_unverified_context()
+        ) as resp:
             raw = resp.read().decode("utf-8")
             return json.loads(raw) if raw else {}
     except urllib.error.HTTPError as e:
@@ -782,7 +792,9 @@ def upsert_to_compuchat(
         },
     )
     try:
-        with urllib.request.urlopen(req, timeout=max(15, int(timeout))) as resp:
+        with urllib.request.urlopen(
+            req, timeout=max(15, int(timeout)), context=_ssl_unverified_context()
+        ) as resp:
             raw = resp.read().decode("utf-8")
             return json.loads(raw) if raw else {"results": []}
     except urllib.error.HTTPError as e:
