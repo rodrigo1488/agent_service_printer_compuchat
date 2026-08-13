@@ -4,7 +4,7 @@ import sys
 import threading
 from datetime import datetime
 from typing import List, Optional
-from flask import Flask, request, redirect, url_for, render_template, jsonify
+from flask import Flask, request, redirect, url_for, render_template, jsonify, send_file
 from flask_cors import CORS
 
 import db
@@ -60,6 +60,7 @@ def _config_context():
     )
     pos_api_token = db.get_config("pos_api_token") or ""
     uniplus_mesa_tipopedido = db.get_config("uniplus_mesa_tipopedido") or "1"
+    pos_images = _pos_images_for_ui()
     return {
         "active_nav": "config",
         "ws_url": ws_url,
@@ -79,7 +80,34 @@ def _config_context():
         "uniplus_mesa_tipopedido": uniplus_mesa_tipopedido,
         "pos_catalog_version": db.get_config("pos_catalog_version") or "0",
         "pos_last_sync_error": db.get_config("pos_last_sync_error") or "",
+        "pos_images": pos_images,
+        "pos_images_ok": sum(1 for i in pos_images if i.get("exists")),
+        "pos_images_missing": sum(1 for i in pos_images if not i.get("exists")),
     }
+
+
+def _pos_images_for_ui():
+    """Imagens do catálogo POS com nomes dos produtos e se o arquivo existe."""
+    names_by_id = {}
+    for product in db.list_pos_products():
+        image_id = str(product.get("imageId") or "").strip()
+        if not image_id:
+            continue
+        name = str(product.get("name") or "").strip() or f"Produto {product.get('id')}"
+        names_by_id.setdefault(image_id, []).append(name)
+    out = []
+    for img in db.list_pos_images():
+        path = img.get("path") or ""
+        exists = bool(path and os.path.isfile(path))
+        out.append(
+            {
+                "id": img.get("id"),
+                "exists": exists,
+                "products": names_by_id.get(str(img.get("id") or ""), []),
+            }
+        )
+    out.sort(key=lambda i: (not i["exists"], (i["products"][0] if i["products"] else i["id"] or "").lower()))
+    return out
 
 
 def _build_health_status():
@@ -332,6 +360,19 @@ def pos_catalog_sync_ui():
             url_for("index", message=f"Falha no sync POS: {e}", message_type="error")
             + "#pos"
         )
+
+
+@app.route("/pos/media-preview/<image_id>", methods=["GET"])
+def pos_media_preview(image_id: str):
+    """Preview das imagens POS na UI do Agent (sem token do tablet)."""
+    safe = "".join(ch for ch in (image_id or "") if ch.isalnum() or ch in "-_.")
+    if not safe or safe != image_id:
+        return "not_found", 404
+    row = db.get_pos_image(safe)
+    path = (row or {}).get("path") or ""
+    if not path or not os.path.isfile(path):
+        return "not_found", 404
+    return send_file(path)
 
 
 @app.route("/pos/images-sync", methods=["POST"])

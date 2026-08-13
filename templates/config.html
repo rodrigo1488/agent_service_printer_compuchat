@@ -40,6 +40,40 @@
     }
     .check-row input { width: auto; }
     .check-row label { margin: 0; font-weight: 600; }
+    .pos-images-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+        gap: 0.75rem;
+        margin-top: 0.75rem;
+    }
+    .pos-image-card {
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        overflow: hidden;
+        background: #fff;
+    }
+    .pos-image-card img,
+    .pos-image-missing {
+        width: 100%;
+        height: 110px;
+        object-fit: cover;
+        display: block;
+        background: #eef2f5;
+    }
+    .pos-image-missing {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: #9a3412;
+        font-size: 0.75rem;
+        font-weight: 700;
+    }
+    .pos-image-card figcaption {
+        padding: 0.45rem 0.55rem 0.6rem;
+        font-size: 0.75rem;
+        line-height: 1.3;
+    }
+    .pos-image-card .muted { color: #64748b; }
 </style>
 {% endblock %}
 {% block content %}
@@ -234,6 +268,37 @@
             <p class="hint">Versão do catálogo local: <strong>{{ pos_catalog_version or 0 }}</strong>
                 {% if pos_last_sync_error %}<br>Último erro: {{ pos_last_sync_error }}{% endif %}
             </p>
+        </div>
+        <div class="section-card">
+            <h3 style="margin-bottom: 0.4rem;">Imagens do catálogo</h3>
+            <p class="hint">
+                {{ pos_images|length }} no índice
+                · {{ pos_images_ok }} no disco
+                {% if pos_images_missing %}· {{ pos_images_missing }} faltando{% endif %}
+            </p>
+            {% if pos_images %}
+            <div class="pos-images-grid">
+                {% for img in pos_images %}
+                <figure class="pos-image-card">
+                    {% if img.exists %}
+                    <img src="{{ url_for('pos_media_preview', image_id=img.id) }}" alt="{{ img.products[0] if img.products else img.id }}">
+                    {% else %}
+                    <div class="pos-image-missing">Arquivo ausente</div>
+                    {% endif %}
+                    <figcaption>
+                        {% if img.products %}
+                        {{ img.products[:2]|join(', ') }}
+                        {% if img.products|length > 2 %}<span class="muted"> +{{ img.products|length - 2 }}</span>{% endif %}
+                        {% else %}
+                        <span class="muted">Sem produto</span>
+                        {% endif %}
+                    </figcaption>
+                </figure>
+                {% endfor %}
+            </div>
+            {% else %}
+            <p class="hint">Nenhuma imagem ainda. Sincronize o catálogo ou force o download.</p>
+            {% endif %}
         </div>
     </div>
 
