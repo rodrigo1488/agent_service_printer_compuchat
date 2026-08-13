@@ -644,6 +644,10 @@ def replace_pos_catalog(catalog: Dict[str, Any]) -> None:
             "pos_grupo_addon",
             json.dumps(catalog.get("grupoAddOn") or [], ensure_ascii=False),
         )
+        set_config(
+            "pos_print_routes",
+            json.dumps(catalog.get("printRoutes") or [], ensure_ascii=False),
+        )
     finally:
         conn.close()
 
@@ -809,6 +813,11 @@ def list_pos_addon_groups() -> List[Dict[str, Any]]:
         conn.close()
 
 
+def list_pos_print_routes() -> List[Dict[str, Any]]:
+    rows = _json_load(get_config("pos_print_routes"), [])
+    return rows if isinstance(rows, list) else []
+
+
 def list_pos_printers() -> List[Dict[str, Any]]:
     conn = _get_connection()
     try:
@@ -855,6 +864,7 @@ def build_pos_sync_payload() -> Dict[str, Any]:
         "groups": list_pos_addon_groups(),
         "productGroups": _json_load(get_config("pos_product_groups"), []),
         "grupoAddOn": _json_load(get_config("pos_grupo_addon"), []),
+        "printRoutes": _json_load(get_config("pos_print_routes"), []),
         "printers": list_pos_printers(),
         "images": [
             {"id": i["id"], "hash": i["hash"], "url": f"/pos/media/{i['id']}"}

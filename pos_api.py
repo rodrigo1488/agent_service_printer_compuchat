@@ -128,27 +128,109 @@ def _build_uniplus_items(menu_items: List[Dict[str, Any]], protocol: str) -> Lis
     return itens
 
 
+def _item_grupo(item: Dict[str, Any]) -> str:
+    grupo = str(item.get("grupo") or "").strip()
+    if grupo:
+        return grupo
+    product_id = item.get("productId")
+    if product_id:
+        product = _find_product(int(product_id))
+        if product and product.get("grupo"):
+            return str(product.get("grupo")).strip()
+    return "Outros"
+
+
+def _print_routes() -> Dict[str, List[str]]:
+    rows = db.list_pos_print_routes()
+    if not isinstance(rows, list):
+        return {}
+    by_device: Dict[str, List[str]] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        device_id = str(row.get("deviceId") or "").strip().lower()
+        if not device_id:
+            continue
+        names = [
+            str(g).strip()
+            for g in (row.get("groupNames") or [])
+            if str(g or "").strip()
+        ]
+        if not names:
+            continue
+        current = by_device.setdefault(device_id, [])
+        for name in names:
+            if name not in current:
+                current.append(name)
+    return by_device
+
+
+def _items_for_printer(items: List[Dict[str, Any]], group_names: List[str]) -> List[Dict[str, Any]]:
+    if any(name == "*" for name in group_names):
+        return items
+    want = {name.lower() for name in group_names}
+    return [item for item in items if str(item.get("grupo") or "Outros").strip().lower() in want]
+
+
+def _send_receipt(printer_cfg: Dict[str, Any], payload: Dict[str, Any]) -> None:
+    from printer_service import PrinterService
+    from receipt_formatter import format_order_receipt
+
+    printer = PrinterService(
+        printer_ip=printer_cfg.get("printer_ip"),
+        printer_port=int(printer_cfg.get("printer_port") or 9100),
+        printer_type=printer_cfg.get("printer_type") or "raw",
+        paper_width=int(printer_cfg.get("paper_width") or 32),
+        printer_encoding=printer_cfg.get("printer_encoding") or "cp850",
+        connection_type=printer_cfg.get("connection_type") or "network",
+        printer_name_local=printer_cfg.get("printer_name_local") or None,
+    )
+    printer.print_receipt(format_order_receipt(payload))
+
+
 def _print_kitchen(payload: Dict[str, Any]) -> None:
     try:
-        from printer_service import PrinterService
-        from receipt_formatter import format_order_receipt
-
         printers = db.get_printers()
         if not printers:
             return
-        receipt = format_order_receipt(payload)
-        for p in printers:
-            printer = PrinterService(
-                printer_ip=p.get("printer_ip"),
-                printer_port=int(p.get("printer_port") or 9100),
-                printer_type=p.get("printer_type") or "raw",
-                paper_width=int(p.get("paper_width") or 32),
-                printer_encoding=p.get("printer_encoding") or "cp850",
-                connection_type=p.get("connection_type") or "network",
-                printer_name_local=p.get("printer_name_local") or None,
-            )
+        items = []
+        for raw in payload.get("menuItems") or []:
+            if not isinstance(raw, dict):
+                continue
+            item = dict(raw)
+            item["grupo"] = _item_grupo(item)
+            items.append(item)
+        if not items:
+            return
+
+        routes = _print_routes()
+        jobs: List[tuple] = []
+        if not routes:
+            jobs = [(p, items) for p in printers]
+        else:
+            used = set()
+            for p in printers:
+                device_id = str(p.get("device_id") or "").strip().lower()
+                groups = routes.get(device_id)
+                if not groups:
+                    continue
+                subset = _items_for_printer(items, groups)
+                if not subset:
+                    continue
+                jobs.append((p, subset))
+                used.update(id(it) for it in subset)
+            leftover = [it for it in items if id(it) not in used]
+            if leftover:
+                star = [p for p in printers if "*" in (routes.get(str(p.get("device_id") or "").strip().lower()) or [])]
+                targets = star or printers
+                for p in targets:
+                    jobs.append((p, leftover))
+
+        for printer_cfg, subset in jobs:
+            job = dict(payload)
+            job["menuItems"] = subset
             try:
-                printer.print_receipt(receipt)
+                _send_receipt(printer_cfg, job)
             except Exception:
                 continue
     except Exception as exc:
