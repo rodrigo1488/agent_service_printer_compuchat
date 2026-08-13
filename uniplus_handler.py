@@ -22,6 +22,31 @@ except ImportError:
     RealDictCursor = None  # type: ignore
 
 _IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_NUMERO_RE = re.compile(r"(\d+)")
+
+
+def parse_numeromesa(raw: Any) -> Optional[int]:
+    """Aceita 2, '2', 'Mesa 2' — o POS às vezes manda o rótulo, não o número."""
+    if raw is None:
+        return None
+    if isinstance(raw, bool):
+        return None
+    if isinstance(raw, (int, float)):
+        n = int(raw)
+        return n if n > 0 else None
+    text = str(raw).strip()
+    if not text:
+        return None
+    if text.isdigit():
+        n = int(text)
+        return n if n > 0 else None
+    found = _NUMERO_RE.findall(text)
+    if not found:
+        return None
+    n = int(found[-1])
+    return n if n > 0 else None
+
+
 CONNECT_TIMEOUT_SEC = 8
 STATEMENT_TIMEOUT_MS = 15000
 # Fallback CONTAMESAITEM.idunidademedida quando o produto UniPlus não tem unidade
@@ -861,16 +886,23 @@ def handle_uniplus_job(db_module, conteudo: Dict[str, Any]) -> Dict[str, Any]:
                     or contamesa.get("orderType")
                     or ""
                 ).strip().lower()
-                requested_mesa = contamesa.get("numeromesa")
-                try:
-                    requested_mesa_int = (
-                        int(requested_mesa) if requested_mesa not in (None, "") else None
-                    )
-                except (TypeError, ValueError):
-                    requested_mesa_int = None
+                requested_mesa_int = parse_numeromesa(contamesa.get("numeromesa"))
+                if not requested_mesa_int:
+                    requested_mesa_int = parse_numeromesa(contamesa.get("nome"))
+                if not requested_mesa_int:
+                    requested_mesa_int = parse_numeromesa(contamesa.get("obs"))
+
+                if order_type == "mesa":
+                    try:
+                        mesa_tipopedido = int(contamesa.get("tipopedido") or 1)
+                    except (TypeError, ValueError):
+                        mesa_tipopedido = 1
+                    if mesa_tipopedido == 0:
+                        mesa_tipopedido = 1
+                    contamesa["tipopedido"] = mesa_tipopedido
 
                 if order_type == "mesa" and requested_mesa_int and requested_mesa_int > 0:
-                    tipopedido = int(contamesa.get("tipopedido") or 0)
+                    tipopedido = int(contamesa.get("tipopedido") or 1)
                     open_conta = _open_conta_by_numeromesa(
                         cur, mesa_table, requested_mesa_int, tipopedido
                     )

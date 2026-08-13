@@ -59,7 +59,7 @@ def _config_context():
         "true", "1", "yes", "on"
     )
     pos_api_token = db.get_config("pos_api_token") or ""
-    uniplus_mesa_tipopedido = db.get_config("uniplus_mesa_tipopedido") or "0"
+    uniplus_mesa_tipopedido = db.get_config("uniplus_mesa_tipopedido") or "1"
     return {
         "active_nav": "config",
         "ws_url": ws_url,
@@ -216,7 +216,7 @@ def config():
             db.set_config("pos_api_token", request.form.get("pos_api_token", "").strip())
             db.set_config(
                 "uniplus_mesa_tipopedido",
-                (request.form.get("uniplus_mesa_tipopedido") or "0").strip() or "0",
+                (request.form.get("uniplus_mesa_tipopedido") or "1").strip() or "1",
             )
             db.set_config(
                 "uniplus_product_sync_poll",

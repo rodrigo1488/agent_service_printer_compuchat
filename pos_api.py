@@ -11,7 +11,12 @@ from flask import Blueprint, jsonify, request, send_file
 
 import db
 from pos_catalog import media_dir, sync_catalog_from_cloud
-from uniplus_handler import handle_uniplus_job, is_uniplus_enabled, list_open_contas
+from uniplus_handler import (
+    handle_uniplus_job,
+    is_uniplus_enabled,
+    list_open_contas,
+    parse_numeromesa,
+)
 
 pos_bp = Blueprint("pos", __name__)
 
@@ -234,10 +239,7 @@ def _mesas_com_status_uniplus() -> List[Dict[str, Any]]:
 
     used_nums = set()
     for mesa in mesas:
-        num = None
-        raw = str(mesa.get("number") or "").strip()
-        if raw.isdigit():
-            num = int(raw)
+        num = parse_numeromesa(mesa.get("number")) or parse_numeromesa(mesa.get("name"))
         conta = open_by_num.get(num) if num is not None else None
         if conta:
             mesa["status"] = "ocupada"
@@ -301,10 +303,21 @@ def pos_orders():
     table_id = body.get("tableId")
     if table_id is not None:
         mesa = db.get_pos_mesa(int(table_id))
-    table_number = str(body.get("tableNumber") or (mesa or {}).get("number") or "").strip()
+    table_number = str(
+        body.get("tableNumber")
+        or (mesa or {}).get("number")
+        or (mesa or {}).get("name")
+        or ""
+    ).strip()
+    table_num_int = parse_numeromesa(table_number) or parse_numeromesa(
+        (mesa or {}).get("name")
+    )
     customer_name = str(body.get("customerName") or (mesa or {}).get("contactName") or "Cliente").strip()
     garcom_name = str(body.get("garcomName") or "").strip()
-    protocol = str(body.get("protocol") or f"POS-{table_number or 'M'}-{int(datetime.now().timestamp())}")[:40]
+    protocol = str(
+        body.get("protocol")
+        or f"POS-{table_num_int or table_number or 'M'}-{int(datetime.now().timestamp())}"
+    )[:40]
 
     itens = _build_uniplus_items(menu_items, protocol)
     if not itens:
@@ -312,18 +325,20 @@ def pos_orders():
 
     total = round(sum(float(it.get("valortotal") or 0) for it in itens), 2)
     now = datetime.now(timezone.utc)
-    tipopedido = int(db.get_config("uniplus_mesa_tipopedido") or 0)
-    nome_display = f"{customer_name} (Mesa {table_number})" if table_number else customer_name
+    # PDV de mesa no Uniplus usa tipopedido=1; 0 é delivery e some da sala.
+    try:
+        tipopedido = int(db.get_config("uniplus_mesa_tipopedido") or 1)
+    except (TypeError, ValueError):
+        tipopedido = 1
+    if tipopedido == 0:
+        tipopedido = 1
+    mesa_label = str(table_num_int or table_number or "").strip()
+    nome_display = f"{customer_name} (Mesa {mesa_label})" if mesa_label else customer_name
     obs_parts = [p for p in [
-        f"Mesa {table_number}" if table_number else "",
+        f"Mesa {mesa_label}" if mesa_label else "",
         f"Garçom: {garcom_name}" if garcom_name else "",
         f"Compuchat {protocol}",
     ] if p]
-
-    try:
-        table_num_int = int(str(table_number).strip()) if str(table_number).strip().isdigit() else None
-    except ValueError:
-        table_num_int = None
 
     conteudo = {
         "event": "uniplus.delivery",

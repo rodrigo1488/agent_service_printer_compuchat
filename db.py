@@ -36,7 +36,7 @@ DEFAULT_CONFIG = {
     "pos_catalog_version": "0",
     "pos_catalog_updated_at": "",
     "pos_last_sync_error": "",
-    "uniplus_mesa_tipopedido": "0",
+    "uniplus_mesa_tipopedido": "1",
 }
 PRINTER_KEYS = ("device_id", "token", "printer_ip", "printer_port", "printer_type", "paper_width", "printer_encoding", "name", "connection_type", "printer_name_local")
 
@@ -171,6 +171,15 @@ def init_db():
                     "INSERT OR IGNORE INTO config (key, value) VALUES (?, ?)",
                     (key, str(value)),
                 )
+            conn.commit()
+        # Instalação antiga gravou 0 (delivery). O PDV de mesa do Uniplus usa 1.
+        row = conn.execute(
+            "SELECT value FROM config WHERE key = 'uniplus_mesa_tipopedido'"
+        ).fetchone()
+        if row is not None and str(row[0]).strip() == "0":
+            conn.execute(
+                "UPDATE config SET value = '1' WHERE key = 'uniplus_mesa_tipopedido'"
+            )
             conn.commit()
     finally:
         conn.close()
