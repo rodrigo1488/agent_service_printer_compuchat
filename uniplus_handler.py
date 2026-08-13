@@ -25,6 +25,20 @@ _IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _NUMERO_RE = re.compile(r"(\d+)")
 
 
+def _safe_print_text(raw: Any, *, mesa: bool = False) -> str:
+    """O layout Unichef imprime OBS como 'OBS : ***' + texto.
+
+    Se o texto começa com 'Mesa N', o driver tenta ler '***Mesa N' como
+    comando ESC/POS (convertStringToArrayInt) e estoura NTFR815.
+    """
+    text = str(raw or "").replace("***", "").strip()
+    if not text:
+        return ""
+    if mesa and (text.startswith("Mesa ") or "Compuchat POS-" in text):
+        return ""
+    return text[:255]
+
+
 def parse_numeromesa(raw: Any) -> Optional[int]:
     """Aceita 2, '2', 'Mesa 2' — o POS às vezes manda o rótulo, não o número."""
     if raw is None:
@@ -661,6 +675,39 @@ def _open_conta_by_numeromesa(
     }
 
 
+def _fix_mesa_print_fields(cur, mesa_table: str, conta_id: int, contamesa: Dict[str, Any]) -> None:
+    """Limpa obs/nome que quebram a impressão gerencial do Unichef."""
+    cliente = str(
+        contamesa.get("nomecliente") or contamesa.get("nome") or ""
+    ).strip()
+    if " (Mesa " in cliente:
+        cliente = cliente.split(" (Mesa ")[0].strip()
+    try:
+        cur.execute(
+            f"""
+            UPDATE {mesa_table}
+            SET obs = '',
+                nome = CASE
+                    WHEN nome IS NULL OR nome LIKE '%%(Mesa %%' THEN %s
+                    ELSE nome
+                END,
+                nomecliente = CASE
+                    WHEN COALESCE(nomecliente, '') = '' THEN %s
+                    ELSE nomecliente
+                END
+            WHERE id = %s
+              AND (
+                    obs LIKE 'Mesa %%'
+                    OR obs LIKE '%%Compuchat POS-%%'
+                    OR nome LIKE '%%(Mesa %%'
+              )
+            """,
+            (cliente[:60], cliente[:60], int(conta_id)),
+        )
+    except Exception:
+        pass
+
+
 def _bump_conta_totals(cur, mesa_table: str, conta_id: int, add_total: float, now: datetime) -> None:
     try:
         cur.execute(
@@ -845,7 +892,7 @@ def _insert_contamesa(
         int(contamesa.get("paraviagem") or 0),
         int(contamesa.get("numeropessoas") or 1),
         float(contamesa.get("desconto") or 0),
-        str(contamesa.get("obs") or "")[:255],
+        _safe_print_text(contamesa.get("obs"), mesa=True),
         contamesa.get("data") or now.date().isoformat(),
         hora_abert,
         contamesa.get("horaultimoconsumo") or hora_abert,
@@ -859,8 +906,11 @@ def _insert_contamesa(
     # Unico lista delivery pelo campo `nome` (além de nomecliente).
     known_cols = table_cols or set()
     if not known_cols or "nome" in known_cols:
+        nome_val = str(contamesa.get("nome") or cliente)
+        if " (Mesa " in nome_val:
+            nome_val = nome_val.split(" (Mesa ")[0].strip()
         cols.append("nome")
-        values.append(str(contamesa.get("nome") or cliente)[:60])
+        values.append(nome_val[:60])
     if not known_cols or "horapedidoefetuado" in known_cols:
         cols.append("horapedidoefetuado")
         values.append(hora_pedido)
@@ -1004,6 +1054,7 @@ def handle_uniplus_job(db_module, conteudo: Dict[str, Any]) -> Dict[str, Any]:
                         conta_id = open_conta["id"]
                         numeromesa = open_conta["numeromesa"]
                         reused_mesa = True
+                        _fix_mesa_print_fields(cur, mesa_table, conta_id, contamesa)
 
                 for attempt in range(5):
                     if reused_mesa:
@@ -1133,7 +1184,7 @@ def handle_uniplus_job(db_module, conteudo: Dict[str, Any]) -> Dict[str, Any]:
                         qty=qty,
                         precounitario=precounitario,
                         valortotal=valortotal,
-                        observacao=str(item.get("observacao") or ""),
+                        observacao=_safe_print_text(item.get("observacao")),
                         protocol_key=protocol_key,
                         item_hash=item_hash,
                         data_val=data_val,

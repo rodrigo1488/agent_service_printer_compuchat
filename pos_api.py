@@ -348,14 +348,6 @@ def pos_orders():
         tipopedido = 1
     if tipopedido == 0:
         tipopedido = 1
-    mesa_label = str(table_num_int or table_number or "").strip()
-    nome_display = f"{customer_name} (Mesa {mesa_label})" if mesa_label else customer_name
-    obs_parts = [p for p in [
-        f"Mesa {mesa_label}" if mesa_label else "",
-        f"Garçom: {garcom_name}" if garcom_name else "",
-        f"Compuchat {protocol}",
-    ] if p]
-
     conteudo = {
         "event": "uniplus.delivery",
         "protocol": protocol,
@@ -363,13 +355,13 @@ def pos_orders():
         "contamesa": {
             "tipopedido": tipopedido,
             "numeromesa": table_num_int,
-            "nome": nome_display[:60],
+            "nome": customer_name[:60],
             "nomecliente": customer_name[:60],
             "valortotal": total,
             "valorcombinado": total,
             "valorentrega": 0,
             "valoroutros": total,
-            "obs": " | ".join(obs_parts)[:255],
+            "obs": "",
             "hash": str(uuid.uuid4()),
             "orderidintegracao": protocol,
             "data": now.date().isoformat(),
