@@ -246,10 +246,12 @@ def _mesas_com_status_uniplus() -> List[Dict[str, Any]]:
             mesa["status"] = "ocupada"
             if conta.get("cliente"):
                 mesa["contactName"] = conta["cliente"]
+            mesa["valortotal"] = float(conta.get("valortotal") or 0)
             used_nums.add(num)
         else:
             mesa["status"] = "livre"
             mesa["contactName"] = None
+            mesa["valortotal"] = 0
     for num, conta in open_by_num.items():
         if num in used_nums:
             continue
@@ -262,6 +264,7 @@ def _mesas_com_status_uniplus() -> List[Dict[str, Any]]:
                 "status": "ocupada",
                 "formId": None,
                 "contactName": conta.get("cliente") or None,
+                "valortotal": float(conta.get("valortotal") or 0),
                 "displayOrder": num,
                 "section": None,
             }

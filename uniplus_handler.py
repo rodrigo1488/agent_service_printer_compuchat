@@ -124,6 +124,7 @@ def list_open_contas(
                 cliente_expr = "nomecliente"
             elif "nome" in cols:
                 cliente_expr = "nome"
+            total_expr = "valortotal" if "valortotal" in cols else "0"
             where = "status = 1 AND numeromesa IS NOT NULL"
             params: List[Any] = []
             if tipopedido is not None and "tipopedido" in cols:
@@ -131,7 +132,7 @@ def list_open_contas(
                 params.append(int(tipopedido))
             cur.execute(
                 f"""
-                SELECT numeromesa, {cliente_expr} AS cliente
+                SELECT numeromesa, {cliente_expr} AS cliente, {total_expr} AS valortotal
                 FROM {mesa_table}
                 WHERE {where}
                 ORDER BY id DESC
@@ -152,6 +153,7 @@ def list_open_contas(
                     {
                         "numeromesa": num,
                         "cliente": str(row.get("cliente") or "").strip(),
+                        "valortotal": float(row.get("valortotal") or 0),
                     }
                 )
             return out
