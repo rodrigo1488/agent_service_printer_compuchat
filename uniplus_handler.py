@@ -5,7 +5,7 @@ import logging
 import re
 import uuid
 import unicodedata
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 logger = logging.getLogger("uniplus")
@@ -224,9 +224,24 @@ def get_open_mesa_conta(db_module, numeromesa: int) -> Dict[str, Any]:
             nome_col = "nomeproduto" if "nomeproduto" in item_cols else "''"
             qtd_col = "quantidade" if "quantidade" in item_cols else "1"
             tot_col = "valortotal" if "valortotal" in item_cols else "0"
+            selects = [
+                f"{nome_col} AS nomeproduto",
+                f"{qtd_col} AS quantidade",
+                f"{tot_col} AS valortotal",
+            ]
+            if "observacao" in item_cols:
+                selects.append("observacao")
+            if "precounitario" in item_cols:
+                selects.append("precounitario")
+            if "datahoralancamento" in item_cols:
+                selects.append("datahoralancamento")
+            if "horaabertura" in item_cols:
+                selects.append("horaabertura")
+            if "currenttimemillis" in item_cols:
+                selects.append("currenttimemillis")
             cur.execute(
                 f"""
-                SELECT {nome_col} AS nomeproduto, {qtd_col} AS quantidade, {tot_col} AS valortotal
+                SELECT {", ".join(selects)}
                 FROM {item_table}
                 WHERE {item_where}
                 ORDER BY id
@@ -240,6 +255,9 @@ def get_open_mesa_conta(db_module, numeromesa: int) -> Dict[str, Any]:
                         "nomeproduto": str(it.get("nomeproduto") or "").strip(),
                         "quantidade": float(it.get("quantidade") or 0),
                         "valortotal": float(it.get("valortotal") or 0),
+                        "precounitario": float(it.get("precounitario") or 0),
+                        "observacao": str(it.get("observacao") or "").strip(),
+                        "hora": _format_conta_hora(it),
                     }
                 )
             return {
@@ -251,6 +269,37 @@ def get_open_mesa_conta(db_module, numeromesa: int) -> Dict[str, Any]:
             }
     finally:
         conn.close()
+
+
+def _format_conta_hora(it: Dict[str, Any]) -> str:
+    raw = it.get("datahoralancamento") or it.get("horaabertura")
+    dt = None
+    if isinstance(raw, datetime):
+        dt = raw
+    elif raw is not None:
+        text = str(raw).strip()
+        if text:
+            try:
+                dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            except ValueError:
+                for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S", "%d/%m/%Y %H:%M:%S"):
+                    try:
+                        dt = datetime.strptime(text[:26], fmt)
+                        break
+                    except ValueError:
+                        continue
+    if dt is None:
+        try:
+            millis = int(it.get("currenttimemillis") or 0)
+            if millis > 0:
+                dt = datetime.fromtimestamp(millis / 1000.0, tz=timezone.utc)
+        except (TypeError, ValueError, OSError):
+            dt = None
+    if dt is None:
+        return ""
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(timezone(timedelta(hours=-3)))
+    return dt.strftime("%d/%m %H:%M")
 
 
 def is_uniplus_enabled(db_module) -> bool:
