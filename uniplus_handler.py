@@ -271,35 +271,49 @@ def get_open_mesa_conta(db_module, numeromesa: int) -> Dict[str, Any]:
         conn.close()
 
 
+def _utc_naive(dt: datetime) -> datetime:
+    """Normaliza para UTC sem tz, igual ao cupom (receipt_formatter)."""
+    if dt.tzinfo is not None:
+        return dt.replace(tzinfo=None) - (dt.utcoffset() or timedelta(0))
+    return dt
+
+
 def _format_conta_hora(it: Dict[str, Any]) -> str:
-    raw = it.get("datahoralancamento") or it.get("horaabertura")
+    """Hora do item em Brasília (UTC-3), igual à impressão da cozinha.
+
+    O Postgres do Print Agent costuma estar em outro fuso. currenttimemillis
+    é epoch UTC; timestamp sem tz gravado pelo Agent também é UTC.
+    """
     dt = None
-    if isinstance(raw, datetime):
-        dt = raw
-    elif raw is not None:
-        text = str(raw).strip()
-        if text:
-            try:
-                dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
-            except ValueError:
-                for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S", "%d/%m/%Y %H:%M:%S"):
-                    try:
-                        dt = datetime.strptime(text[:26], fmt)
-                        break
-                    except ValueError:
-                        continue
+    try:
+        millis = int(it.get("currenttimemillis") or 0)
+        if millis > 10_000_000_000:
+            dt = datetime.utcfromtimestamp(millis / 1000.0)
+        elif millis > 1_000_000_000:
+            dt = datetime.utcfromtimestamp(float(millis))
+    except (TypeError, ValueError, OSError):
+        dt = None
     if dt is None:
-        try:
-            millis = int(it.get("currenttimemillis") or 0)
-            if millis > 0:
-                dt = datetime.fromtimestamp(millis / 1000.0, tz=timezone.utc)
-        except (TypeError, ValueError, OSError):
-            dt = None
+        raw = it.get("datahoralancamento") or it.get("horaabertura")
+        if isinstance(raw, datetime):
+            dt = _utc_naive(raw)
+        elif raw is not None:
+            text = str(raw).strip()
+            if text:
+                try:
+                    parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+                    dt = _utc_naive(parsed)
+                except ValueError:
+                    for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S", "%d/%m/%Y %H:%M:%S"):
+                        try:
+                            dt = datetime.strptime(text[:26], fmt)
+                            break
+                        except ValueError:
+                            continue
     if dt is None:
         return ""
-    if dt.tzinfo is not None:
-        dt = dt.astimezone(timezone(timedelta(hours=-3)))
-    return dt.strftime("%d/%m %H:%M")
+    brasil = _utc_naive(dt) - timedelta(hours=3)
+    return brasil.strftime("%d/%m %H:%M")
 
 
 def is_uniplus_enabled(db_module) -> bool:
