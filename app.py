@@ -11,6 +11,7 @@ import db
 from agent import start_agent_thread, stop_agent
 from product_sync import refresh_product_sync_thread, start_product_sync_thread
 from error_recovery import DataValidator, DatabaseRecovery
+from pos_api import pos_bp
 
 # Tentar importar win32print para listar impressoras locais (Windows)
 try:
@@ -29,6 +30,7 @@ else:
 app = Flask(__name__, template_folder=_template_folder)
 CORS(app)
 app.config["SECRET_KEY"] = "print-agent-secret"
+app.register_blueprint(pos_bp)
 
 # Inicializar banco na importação
 db.init_db()
@@ -56,6 +58,8 @@ def _config_context():
     uniplus_product_sync_poll = (db.get_config("uniplus_product_sync_poll") or "false").lower() in (
         "true", "1", "yes", "on"
     )
+    pos_api_token = db.get_config("pos_api_token") or ""
+    uniplus_mesa_tipopedido = db.get_config("uniplus_mesa_tipopedido") or "0"
     return {
         "active_nav": "config",
         "ws_url": ws_url,
@@ -71,6 +75,10 @@ def _config_context():
         "uniplus_contamesa_table": uniplus_contamesa_table,
         "uniplus_contamesaitem_table": uniplus_contamesaitem_table,
         "uniplus_product_sync_poll": uniplus_product_sync_poll,
+        "pos_api_token": pos_api_token,
+        "uniplus_mesa_tipopedido": uniplus_mesa_tipopedido,
+        "pos_catalog_version": db.get_config("pos_catalog_version") or "0",
+        "pos_last_sync_error": db.get_config("pos_last_sync_error") or "",
     }
 
 
@@ -205,6 +213,11 @@ def config():
 
             db.set_config("uniplus_enabled", "true" if uniplus_enabled else "false")
             db.set_config("uniplus_connection_string", uniplus_dsn)
+            db.set_config("pos_api_token", request.form.get("pos_api_token", "").strip())
+            db.set_config(
+                "uniplus_mesa_tipopedido",
+                (request.form.get("uniplus_mesa_tipopedido") or "0").strip() or "0",
+            )
             db.set_config(
                 "uniplus_product_sync_poll",
                 "true" if uniplus_product_sync_poll else "false",
@@ -297,6 +310,28 @@ def config():
                 message_type="error",
             )
     return render_template("config.html", **_config_context())
+
+
+@app.route("/pos/catalog-sync", methods=["POST"])
+def pos_catalog_sync_ui():
+    """Sync manual do catálogo POS a partir da UI do Agent."""
+    try:
+        from pos_catalog import sync_catalog_from_cloud
+
+        result = sync_catalog_from_cloud()
+        return redirect(
+            url_for(
+                "index",
+                message=f"Catálogo POS sincronizado (v{result.get('catalogVersion')}).",
+                message_type="success",
+            )
+            + "#pos"
+        )
+    except Exception as e:
+        return redirect(
+            url_for("index", message=f"Falha no sync POS: {e}", message_type="error")
+            + "#pos"
+        )
 
 
 @app.route("/health", methods=["GET"])

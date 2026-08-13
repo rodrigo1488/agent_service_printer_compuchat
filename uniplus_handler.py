@@ -463,6 +463,64 @@ def _next_numeromesa(cur, mesa_table: str, *, open_delivery_only: bool = True) -
     return max(next_num, 1)
 
 
+def _open_conta_by_numeromesa(
+    cur, mesa_table: str, numeromesa: int, tipopedido: Optional[int] = None
+) -> Optional[Dict[str, Any]]:
+    """Conta aberta (status=1) da mesa física."""
+    if tipopedido is None:
+        cur.execute(
+            f"""
+            SELECT id, numeromesa, status
+            FROM {mesa_table}
+            WHERE numeromesa = %s AND status = 1
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (int(numeromesa),),
+        )
+    else:
+        cur.execute(
+            f"""
+            SELECT id, numeromesa, status
+            FROM {mesa_table}
+            WHERE numeromesa = %s AND status = 1 AND tipopedido = %s
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (int(numeromesa), int(tipopedido)),
+        )
+    row = cur.fetchone()
+    if not row:
+        return None
+    return {
+        "id": int(row["id"]),
+        "numeromesa": int(row["numeromesa"]) if row.get("numeromesa") is not None else int(numeromesa),
+    }
+
+
+def _bump_conta_totals(cur, mesa_table: str, conta_id: int, add_total: float, now: datetime) -> None:
+    try:
+        cur.execute(
+            f"""
+            UPDATE {mesa_table}
+            SET valortotal = COALESCE(valortotal, 0) + %s,
+                valorcombinado = COALESCE(valorcombinado, 0) + %s,
+                horaultimoconsumo = %s,
+                timestampalteracao = %s
+            WHERE id = %s
+            """,
+            (
+                float(add_total),
+                float(add_total),
+                now.isoformat(),
+                int(now.timestamp() * 1000),
+                int(conta_id),
+            ),
+        )
+    except Exception:
+        pass
+
+
 def _existing_by_protocol(cur, mesa_table: str, protocol: str, summary: Dict[str, Any]) -> Dict[str, Any]:
     cur.execute(
         f"""
@@ -639,7 +697,7 @@ def _insert_contamesa(
     known_cols = table_cols or set()
     if not known_cols or "nome" in known_cols:
         cols.append("nome")
-        values.append(cliente)
+        values.append(str(contamesa.get("nome") or cliente)[:60])
     if not known_cols or "horapedidoefetuado" in known_cols:
         cols.append("horapedidoefetuado")
         values.append(hora_pedido)
@@ -752,13 +810,46 @@ def handle_uniplus_job(db_module, conteudo: Dict[str, Any]) -> Dict[str, Any]:
                 conta_id = None
                 numeromesa = None
                 last_exc = None
+                reused_mesa = False
+
+                order_type = str(
+                    conteudo.get("orderType")
+                    or contamesa.get("orderType")
+                    or ""
+                ).strip().lower()
+                requested_mesa = contamesa.get("numeromesa")
+                try:
+                    requested_mesa_int = (
+                        int(requested_mesa) if requested_mesa not in (None, "") else None
+                    )
+                except (TypeError, ValueError):
+                    requested_mesa_int = None
+
+                if order_type == "mesa" and requested_mesa_int and requested_mesa_int > 0:
+                    tipopedido = int(contamesa.get("tipopedido") or 0)
+                    open_conta = _open_conta_by_numeromesa(
+                        cur, mesa_table, requested_mesa_int, tipopedido
+                    )
+                    if not open_conta:
+                        open_conta = _open_conta_by_numeromesa(
+                            cur, mesa_table, requested_mesa_int, None
+                        )
+                    if open_conta:
+                        conta_id = open_conta["id"]
+                        numeromesa = open_conta["numeromesa"]
+                        reused_mesa = True
 
                 for attempt in range(5):
+                    if reused_mesa:
+                        break
                     cur.execute("SAVEPOINT uniplus_ins")
-                    # Após colisão, usa MAX global para não repetir número ocupado
-                    numeromesa = _next_numeromesa(
-                        cur, mesa_table, open_delivery_only=(attempt == 0)
-                    )
+                    # Mesa física: usa o número da mesa. Delivery: aloca card.
+                    if order_type == "mesa" and requested_mesa_int and requested_mesa_int > 0:
+                        numeromesa = requested_mesa_int
+                    else:
+                        numeromesa = _next_numeromesa(
+                            cur, mesa_table, open_delivery_only=(attempt == 0)
+                        )
                     try:
                         conta_id = _insert_contamesa(
                             cur,
@@ -898,12 +989,16 @@ def handle_uniplus_job(db_module, conteudo: Dict[str, Any]) -> Dict[str, Any]:
                         }
                     )
 
+                if reused_mesa:
+                    add_total = sum(float(it.get("total") or 0) for it in inserted_items)
+                    _bump_conta_totals(cur, mesa_table, conta_id, add_total, now)
+
                 result = {
                     **summary,
                     "conta_id": conta_id,
                     "numeromesa": numeromesa,
-                    "action": "created",
-                    "message": "created",
+                    "action": "appended" if reused_mesa else "created",
+                    "message": "appended" if reused_mesa else "created",
                     "itens": inserted_items,
                     "itens_count": len(inserted_items),
                 }

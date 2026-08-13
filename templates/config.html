@@ -55,6 +55,7 @@
         <button type="button" class="tab-btn active" data-tab="conexao">Conexão</button>
         <button type="button" class="tab-btn" data-tab="impressoras">Impressoras</button>
         <button type="button" class="tab-btn" data-tab="uniplus">UniPlus</button>
+        <button type="button" class="tab-btn" data-tab="pos">POS local</button>
         <button type="button" class="tab-btn" data-tab="opcoes">Opções</button>
     </div>
 
@@ -211,7 +212,28 @@
                     <label>Tabela contamesaitem</label>
                     <input type="text" name="uniplus_contamesaitem_table" value="{{ uniplus_contamesaitem_table }}">
                 </div>
+                <div class="form-group">
+                    <label>tipopedido de mesa física (padrão 0)</label>
+                    <input type="text" name="uniplus_mesa_tipopedido" value="{{ uniplus_mesa_tipopedido }}">
+                </div>
             </div>
+        </div>
+    </div>
+
+    <div class="tab-panel" id="tab-pos">
+        <div class="section-card">
+            <h3 style="margin-bottom: 0.4rem;">App POS (tablet / garçom)</h3>
+            <p class="hint" style="margin-bottom: 0.85rem;">
+                O tablet baixa o catálogo em <code>GET /pos/sync</code> e envia pedidos em <code>POST /pos/orders</code>.
+                Token vazio = sem autenticação (só use em LAN confiável).
+            </p>
+            <div class="form-group">
+                <label for="pos_api_token">Token do POS (<code>X-Pos-Token</code>)</label>
+                <input type="text" id="pos_api_token" name="pos_api_token" value="{{ pos_api_token }}" placeholder="opcional">
+            </div>
+            <p class="hint">Versão do catálogo local: <strong>{{ pos_catalog_version or 0 }}</strong>
+                {% if pos_last_sync_error %}<br>Último erro: {{ pos_last_sync_error }}{% endif %}
+            </p>
         </div>
     </div>
 
@@ -229,6 +251,9 @@
     <div class="sticky-actions">
         <button type="submit">Salvar configuração</button>
     </div>
+</form>
+<form method="post" action="/pos/catalog-sync" style="margin-top: 0.75rem;">
+    <button type="submit" class="btn-ghost">Sincronizar catálogo POS agora</button>
 </form>
 
 <template id="printer-block-tpl">

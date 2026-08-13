@@ -32,6 +32,11 @@ DEFAULT_CONFIG = {
     "uniplus_produto_preco_column": "preco",
     "uniplus_produto_nome_column": "nome",
     "uniplus_last_error": "",
+    "pos_api_token": "",
+    "pos_catalog_version": "0",
+    "pos_catalog_updated_at": "",
+    "pos_last_sync_error": "",
+    "uniplus_mesa_tipopedido": "0",
 }
 PRINTER_KEYS = ("device_id", "token", "printer_ip", "printer_port", "printer_type", "paper_width", "printer_encoding", "name", "connection_type", "printer_name_local")
 
@@ -90,6 +95,63 @@ def init_db():
                 enabled INTEGER NOT NULL DEFAULT 1,
                 last_synced_at TIMESTAMP,
                 last_error TEXT
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS pos_users (
+                id INTEGER PRIMARY KEY,
+                name TEXT,
+                pin TEXT,
+                profile TEXT,
+                payload TEXT
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS pos_mesas (
+                id INTEGER PRIMARY KEY,
+                number TEXT,
+                name TEXT,
+                type TEXT,
+                status TEXT,
+                form_id INTEGER,
+                contact_name TEXT,
+                display_order INTEGER,
+                section TEXT
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS pos_products (
+                id INTEGER PRIMARY KEY,
+                payload TEXT
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS pos_groups (
+                id INTEGER PRIMARY KEY,
+                kind TEXT,
+                payload TEXT
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS pos_printers (
+                id INTEGER PRIMARY KEY,
+                device_id TEXT,
+                name TEXT
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS pos_images (
+                id TEXT PRIMARY KEY,
+                url TEXT,
+                hash TEXT,
+                path TEXT
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS pos_orders_queue (
+                client_order_id TEXT PRIMARY KEY,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                result_json TEXT
             )
         """)
         conn.commit()
@@ -500,3 +562,293 @@ def get_print_log_stats() -> dict:
         }
     finally:
         conn.close()
+
+
+def _json_load(raw: Optional[str], default=None):
+    if not raw:
+        return default if default is not None else {}
+    try:
+        return json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return default if default is not None else {}
+
+
+def replace_pos_catalog(catalog: Dict[str, Any]) -> None:
+    """Substitui o snapshot POS local pelo catálogo da cloud."""
+    conn = _get_connection()
+    try:
+        conn.execute("DELETE FROM pos_users")
+        conn.execute("DELETE FROM pos_mesas")
+        conn.execute("DELETE FROM pos_products")
+        conn.execute("DELETE FROM pos_groups")
+        conn.execute("DELETE FROM pos_printers")
+        for u in catalog.get("users") or []:
+            conn.execute(
+                "INSERT INTO pos_users (id, name, pin, profile, payload) VALUES (?, ?, ?, ?, ?)",
+                (
+                    int(u.get("id")),
+                    str(u.get("name") or ""),
+                    str(u.get("pin") or ""),
+                    str(u.get("profile") or ""),
+                    json.dumps(u, ensure_ascii=False),
+                ),
+            )
+        for m in catalog.get("mesas") or []:
+            conn.execute(
+                "INSERT INTO pos_mesas (id, number, name, type, status, form_id, contact_name, display_order, section) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    int(m.get("id")),
+                    str(m.get("number") or ""),
+                    str(m.get("name") or ""),
+                    str(m.get("type") or "mesa"),
+                    str(m.get("status") or "livre"),
+                    m.get("formId"),
+                    m.get("contactName"),
+                    int(m.get("displayOrder") or 0),
+                    m.get("section"),
+                ),
+            )
+        for p in catalog.get("products") or []:
+            conn.execute(
+                "INSERT INTO pos_products (id, payload) VALUES (?, ?)",
+                (int(p.get("id")), json.dumps(p, ensure_ascii=False)),
+            )
+        for g in catalog.get("groups") or []:
+            conn.execute(
+                "INSERT INTO pos_groups (id, kind, payload) VALUES (?, ?, ?)",
+                (int(g.get("id")), "addon", json.dumps(g, ensure_ascii=False)),
+            )
+        for pr in catalog.get("printers") or []:
+            conn.execute(
+                "INSERT INTO pos_printers (id, device_id, name) VALUES (?, ?, ?)",
+                (int(pr.get("id")), str(pr.get("deviceId") or ""), str(pr.get("name") or "")),
+            )
+        conn.commit()
+        set_config("pos_catalog_version", str(catalog.get("catalogVersion") or 0))
+        set_config("pos_catalog_updated_at", str(catalog.get("updatedAt") or ""))
+        set_config(
+            "pos_product_groups",
+            json.dumps(catalog.get("productGroups") or [], ensure_ascii=False),
+        )
+        set_config(
+            "pos_grupo_addon",
+            json.dumps(catalog.get("grupoAddOn") or [], ensure_ascii=False),
+        )
+    finally:
+        conn.close()
+
+
+def upsert_pos_image(image_id: str, url: str, hash_val: str, path: str) -> None:
+    conn = _get_connection()
+    try:
+        conn.execute(
+            "INSERT OR REPLACE INTO pos_images (id, url, hash, path) VALUES (?, ?, ?, ?)",
+            (image_id, url, hash_val, path),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_pos_image(image_id: str) -> Optional[Dict[str, Any]]:
+    conn = _get_connection()
+    try:
+        row = conn.execute(
+            "SELECT id, url, hash, path FROM pos_images WHERE id = ?",
+            (image_id,),
+        ).fetchone()
+        if not row:
+            return None
+        return {"id": row[0], "url": row[1], "hash": row[2], "path": row[3]}
+    finally:
+        conn.close()
+
+
+def list_pos_images() -> List[Dict[str, Any]]:
+    conn = _get_connection()
+    try:
+        rows = conn.execute("SELECT id, url, hash, path FROM pos_images").fetchall()
+        return [{"id": r[0], "url": r[1], "hash": r[2], "path": r[3]} for r in rows]
+    finally:
+        conn.close()
+
+
+def list_pos_users() -> List[Dict[str, Any]]:
+    conn = _get_connection()
+    try:
+        rows = conn.execute(
+            "SELECT id, name, pin, profile, payload FROM pos_users ORDER BY name COLLATE NOCASE"
+        ).fetchall()
+        out = []
+        for r in rows:
+            payload = _json_load(r[4], {})
+            payload.update({"id": r[0], "name": r[1] or "", "pin": r[2] or "", "profile": r[3] or ""})
+            out.append(payload)
+        return out
+    finally:
+        conn.close()
+
+
+def get_pos_user(user_id: int) -> Optional[Dict[str, Any]]:
+    conn = _get_connection()
+    try:
+        row = conn.execute(
+            "SELECT id, name, pin, profile, payload FROM pos_users WHERE id = ?",
+            (int(user_id),),
+        ).fetchone()
+        if not row:
+            return None
+        payload = _json_load(row[4], {})
+        payload.update({"id": row[0], "name": row[1] or "", "pin": row[2] or "", "profile": row[3] or ""})
+        return payload
+    finally:
+        conn.close()
+
+
+def list_pos_mesas() -> List[Dict[str, Any]]:
+    conn = _get_connection()
+    try:
+        rows = conn.execute(
+            "SELECT id, number, name, type, status, form_id, contact_name, display_order, section "
+            "FROM pos_mesas ORDER BY display_order, number COLLATE NOCASE"
+        ).fetchall()
+        return [
+            {
+                "id": r[0],
+                "number": r[1] or "",
+                "name": r[2] or "",
+                "type": r[3] or "mesa",
+                "status": r[4] or "livre",
+                "formId": r[5],
+                "contactName": r[6],
+                "displayOrder": r[7] or 0,
+                "section": r[8],
+            }
+            for r in rows
+        ]
+    finally:
+        conn.close()
+
+
+def get_pos_mesa(mesa_id: int) -> Optional[Dict[str, Any]]:
+    conn = _get_connection()
+    try:
+        row = conn.execute(
+            "SELECT id, number, name, type, status, form_id, contact_name, display_order, section "
+            "FROM pos_mesas WHERE id = ?",
+            (int(mesa_id),),
+        ).fetchone()
+        if not row:
+            return None
+        return {
+            "id": row[0],
+            "number": row[1] or "",
+            "name": row[2] or "",
+            "type": row[3] or "mesa",
+            "status": row[4] or "livre",
+            "formId": row[5],
+            "contactName": row[6],
+            "displayOrder": row[7] or 0,
+            "section": row[8],
+        }
+    finally:
+        conn.close()
+
+
+def update_pos_mesa(mesa_id: int, *, status: str, contact_name: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    conn = _get_connection()
+    try:
+        conn.execute(
+            "UPDATE pos_mesas SET status = ?, contact_name = ? WHERE id = ?",
+            (status, contact_name, int(mesa_id)),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return get_pos_mesa(mesa_id)
+
+
+def list_pos_products() -> List[Dict[str, Any]]:
+    conn = _get_connection()
+    try:
+        rows = conn.execute("SELECT payload FROM pos_products").fetchall()
+        return [_json_load(r[0], {}) for r in rows]
+    finally:
+        conn.close()
+
+
+def get_pos_product(product_id: int) -> Optional[Dict[str, Any]]:
+    conn = _get_connection()
+    try:
+        row = conn.execute(
+            "SELECT payload FROM pos_products WHERE id = ?", (int(product_id),)
+        ).fetchone()
+        return _json_load(row[0], {}) if row else None
+    finally:
+        conn.close()
+
+
+def list_pos_addon_groups() -> List[Dict[str, Any]]:
+    conn = _get_connection()
+    try:
+        rows = conn.execute(
+            "SELECT payload FROM pos_groups WHERE kind = 'addon'"
+        ).fetchall()
+        return [_json_load(r[0], {}) for r in rows]
+    finally:
+        conn.close()
+
+
+def list_pos_printers() -> List[Dict[str, Any]]:
+    conn = _get_connection()
+    try:
+        rows = conn.execute("SELECT id, device_id, name FROM pos_printers").fetchall()
+        return [{"id": r[0], "deviceId": r[1], "name": r[2]} for r in rows]
+    finally:
+        conn.close()
+
+
+def get_pos_order(client_order_id: str) -> Optional[Dict[str, Any]]:
+    conn = _get_connection()
+    try:
+        row = conn.execute(
+            "SELECT result_json FROM pos_orders_queue WHERE client_order_id = ?",
+            (client_order_id,),
+        ).fetchone()
+        return _json_load(row[0], None) if row else None
+    finally:
+        conn.close()
+
+
+def save_pos_order(client_order_id: str, result: Dict[str, Any]) -> None:
+    conn = _get_connection()
+    try:
+        conn.execute(
+            "INSERT OR REPLACE INTO pos_orders_queue (client_order_id, result_json) VALUES (?, ?)",
+            (client_order_id, json.dumps(result, ensure_ascii=False, default=str)),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def build_pos_sync_payload() -> Dict[str, Any]:
+    return {
+        "catalogVersion": int(get_config("pos_catalog_version") or 0),
+        "updatedAt": get_config("pos_catalog_updated_at") or "",
+        "users": [
+            {"id": u["id"], "name": u["name"], "pin": bool(u.get("pin")), "profile": u.get("profile")}
+            for u in list_pos_users()
+        ],
+        "mesas": list_pos_mesas(),
+        "products": list_pos_products(),
+        "groups": list_pos_addon_groups(),
+        "productGroups": _json_load(get_config("pos_product_groups"), []),
+        "grupoAddOn": _json_load(get_config("pos_grupo_addon"), []),
+        "printers": list_pos_printers(),
+        "images": [
+            {"id": i["id"], "hash": i["hash"], "url": f"/pos/media/{i['id']}"}
+            for i in list_pos_images()
+        ],
+    }
