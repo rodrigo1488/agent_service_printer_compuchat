@@ -5,15 +5,10 @@ import logging
 import os
 import threading
 import urllib.request
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 import db
-from product_sync import (
-    _api_base_from_ws,
-    _compuchat_request,
-    _device_auth,
-    _ssl_unverified_context,
-)
+from product_sync import _compuchat_request, _ssl_unverified_context
 
 logger = logging.getLogger("pos_catalog")
 
@@ -77,34 +72,3 @@ def sync_catalog_from_cloud() -> Dict[str, Any]:
         }
 
 
-def cloud_ocupar_mesa(mesa_id: int, customer_name: str) -> Optional[Dict[str, Any]]:
-    try:
-        return _compuchat_request(
-            "PUT",
-            f"/agent/pos/mesas/{int(mesa_id)}/ocupar",
-            body={"customerName": customer_name},
-            timeout=15,
-        )
-    except Exception as exc:
-        logger.warning("Cloud ocupar mesa %s falhou: %s", mesa_id, exc)
-        return None
-
-
-def cloud_liberar_mesa(mesa_id: int) -> Optional[Dict[str, Any]]:
-    try:
-        return _compuchat_request(
-            "PUT",
-            f"/agent/pos/mesas/{int(mesa_id)}/liberar",
-            timeout=15,
-        )
-    except Exception as exc:
-        logger.warning("Cloud liberar mesa %s falhou: %s", mesa_id, exc)
-        return None
-
-
-def cloud_reachable() -> bool:
-    try:
-        device_id, token = _device_auth()
-        return bool(device_id and token and _api_base_from_ws(db.get_config("ws_url") or ""))
-    except Exception:
-        return False

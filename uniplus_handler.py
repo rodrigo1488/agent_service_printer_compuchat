@@ -6,7 +6,7 @@ import re
 import uuid
 import unicodedata
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 logger = logging.getLogger("uniplus")
 
@@ -80,6 +80,50 @@ def _cfg(db_module) -> Dict[str, str]:
             "contamesaitem",
         ),
     }
+
+
+def list_open_contas(db_module) -> List[Dict[str, Any]]:
+    """Contas abertas no Uniplus (status=1), indexadas por numeromesa."""
+    if not is_uniplus_enabled(db_module) or psycopg2 is None:
+        return []
+    cfg = _cfg(db_module)
+    conn = _connect(cfg["connection_string"])
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            mesa_table = cfg["contamesa_table"]
+            cols = _table_columns(cur, mesa_table)
+            cliente_expr = "NULL"
+            if "nomecliente" in cols:
+                cliente_expr = "nomecliente"
+            elif "nome" in cols:
+                cliente_expr = "nome"
+            cur.execute(
+                f"""
+                SELECT numeromesa, {cliente_expr} AS cliente
+                FROM {mesa_table}
+                WHERE status = 1 AND numeromesa IS NOT NULL
+                ORDER BY id DESC
+                """
+            )
+            seen = set()
+            out: List[Dict[str, Any]] = []
+            for row in cur.fetchall() or []:
+                try:
+                    num = int(row["numeromesa"])
+                except (TypeError, ValueError, KeyError):
+                    continue
+                if num in seen:
+                    continue
+                seen.add(num)
+                out.append(
+                    {
+                        "numeromesa": num,
+                        "cliente": str(row.get("cliente") or "").strip(),
+                    }
+                )
+            return out
+    finally:
+        conn.close()
 
 
 def is_uniplus_enabled(db_module) -> bool:

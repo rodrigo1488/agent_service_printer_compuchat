@@ -10,8 +10,8 @@ from typing import Any, Dict, List, Optional
 from flask import Blueprint, jsonify, request, send_file
 
 import db
-from pos_catalog import cloud_liberar_mesa, cloud_ocupar_mesa, media_dir, sync_catalog_from_cloud
-from uniplus_handler import handle_uniplus_job, is_uniplus_enabled
+from pos_catalog import media_dir, sync_catalog_from_cloud
+from uniplus_handler import handle_uniplus_job, is_uniplus_enabled, list_open_contas
 
 pos_bp = Blueprint("pos", __name__)
 
@@ -221,10 +221,55 @@ def pos_login():
     return jsonify({"ok": True, "user": {"id": user["id"], "name": user["name"]}})
 
 
+def _mesas_com_status_uniplus() -> List[Dict[str, Any]]:
+    """Lista do catálogo local + ocupação lida do Uniplus (conta aberta)."""
+    mesas = db.list_pos_mesas()
+    open_by_num: Dict[int, Dict[str, Any]] = {}
+    try:
+        for conta in list_open_contas(db):
+            open_by_num[int(conta["numeromesa"])] = conta
+    except Exception as exc:
+        print(f"[POS] status Uniplus indisponível: {exc}")
+        return mesas
+
+    used_nums = set()
+    for mesa in mesas:
+        num = None
+        raw = str(mesa.get("number") or "").strip()
+        if raw.isdigit():
+            num = int(raw)
+        conta = open_by_num.get(num) if num is not None else None
+        if conta:
+            mesa["status"] = "ocupada"
+            if conta.get("cliente"):
+                mesa["contactName"] = conta["cliente"]
+            used_nums.add(num)
+        else:
+            mesa["status"] = "livre"
+            mesa["contactName"] = None
+    for num, conta in open_by_num.items():
+        if num in used_nums:
+            continue
+        mesas.append(
+            {
+                "id": -num,
+                "number": str(num),
+                "name": f"Mesa {num}",
+                "type": "mesa",
+                "status": "ocupada",
+                "formId": None,
+                "contactName": conta.get("cliente") or None,
+                "displayOrder": num,
+                "section": None,
+            }
+        )
+    return mesas
+
+
 @pos_bp.route("/pos/mesas", methods=["GET"])
 @_require_pos_token
 def pos_mesas():
-    return jsonify({"mesas": db.list_pos_mesas()})
+    return jsonify({"mesas": _mesas_com_status_uniplus()})
 
 
 @pos_bp.route("/pos/mesas/<int:mesa_id>/ocupar", methods=["POST"])
@@ -236,19 +281,7 @@ def pos_ocupar(mesa_id: int):
     if not mesa:
         return jsonify({"error": "mesa_not_found"}), 404
     updated = db.update_pos_mesa(mesa_id, status="ocupada", contact_name=customer_name)
-    cloud = cloud_ocupar_mesa(mesa_id, customer_name)
-    return jsonify({"mesa": updated, "cloud": bool(cloud)})
-
-
-@pos_bp.route("/pos/mesas/<int:mesa_id>/liberar", methods=["POST"])
-@_require_pos_token
-def pos_liberar(mesa_id: int):
-    mesa = db.get_pos_mesa(mesa_id)
-    if not mesa:
-        return jsonify({"error": "mesa_not_found"}), 404
-    updated = db.update_pos_mesa(mesa_id, status="livre", contact_name=None)
-    cloud = cloud_liberar_mesa(mesa_id)
-    return jsonify({"mesa": updated, "cloud": bool(cloud)})
+    return jsonify({"mesa": updated})
 
 
 @pos_bp.route("/pos/orders", methods=["POST"])
