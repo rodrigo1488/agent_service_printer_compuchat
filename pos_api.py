@@ -67,6 +67,11 @@ def _addon_codigo(addon_id: Any) -> str:
     return ""
 
 
+def _user_observation(item: Dict[str, Any]) -> str:
+    raw = item.get("observation") or item.get("observacao") or ""
+    return " ".join(str(raw).split())[:180]
+
+
 def _build_uniplus_items(menu_items: List[Dict[str, Any]], protocol: str) -> List[Dict[str, Any]]:
     itens = []
     for item in menu_items or []:
@@ -110,8 +115,9 @@ def _build_uniplus_items(menu_items: List[Dict[str, Any]], protocol: str) -> Lis
             obs_parts.append(f"Meio a meio: {h1} / {h2}")
         if addon_obs:
             obs_parts.append("Adicionais: " + ", ".join(addon_obs[:8]))
-        if item.get("observation"):
-            obs_parts.append(str(item.get("observation")))
+        user_obs = _user_observation(item)
+        if user_obs:
+            obs_parts.append(user_obs)
         itens.append(
             {
                 "codigoproduto": (codigo or "")[:20],
