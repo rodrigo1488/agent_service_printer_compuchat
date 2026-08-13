@@ -547,7 +547,7 @@ def _open_conta_by_numeromesa(
     if tipopedido is None:
         cur.execute(
             f"""
-            SELECT id, numeromesa, status
+            SELECT id, numeromesa, status, tipopedido
             FROM {mesa_table}
             WHERE numeromesa = %s AND status = 1
             ORDER BY id DESC
@@ -558,7 +558,7 @@ def _open_conta_by_numeromesa(
     else:
         cur.execute(
             f"""
-            SELECT id, numeromesa, status
+            SELECT id, numeromesa, status, tipopedido
             FROM {mesa_table}
             WHERE numeromesa = %s AND status = 1 AND tipopedido = %s
             ORDER BY id DESC
@@ -569,10 +569,46 @@ def _open_conta_by_numeromesa(
     row = cur.fetchone()
     if not row:
         return None
+    tp = row.get("tipopedido")
+    try:
+        tp_int = int(tp) if tp is not None else None
+    except (TypeError, ValueError):
+        tp_int = None
     return {
         "id": int(row["id"]),
         "numeromesa": int(row["numeromesa"]) if row.get("numeromesa") is not None else int(numeromesa),
+        "tipopedido": tp_int,
     }
+
+
+def _promote_conta_to_mesa(
+    cur,
+    mesa_table: str,
+    conta_id: int,
+    tipopedido: int,
+    contamesa: Dict[str, Any],
+) -> None:
+    """Card delivery leftover no mesmo número vira conta de mesa (PDV)."""
+    cols = _table_columns(cur, mesa_table)
+    sets = ["tipopedido = %s"]
+    params: List[Any] = [int(tipopedido)]
+    nome = str(contamesa.get("nome") or "").strip()
+    cliente = str(contamesa.get("nomecliente") or "").strip()
+    obs = str(contamesa.get("obs") or "").strip()
+    if "nome" in cols and nome:
+        sets.append("nome = %s")
+        params.append(nome[:60])
+    if "nomecliente" in cols and cliente:
+        sets.append("nomecliente = %s")
+        params.append(cliente[:60])
+    if "obs" in cols and obs:
+        sets.append("obs = %s")
+        params.append(obs[:255])
+    params.append(int(conta_id))
+    cur.execute(
+        f"UPDATE {mesa_table} SET {', '.join(sets)} WHERE id = %s",
+        tuple(params),
+    )
 
 
 def _bump_conta_totals(cur, mesa_table: str, conta_id: int, add_total: float, now: datetime) -> None:
@@ -915,9 +951,24 @@ def handle_uniplus_job(db_module, conteudo: Dict[str, Any]) -> Dict[str, Any]:
                         cur, mesa_table, requested_mesa_int, tipopedido
                     )
                     if not open_conta:
-                        open_conta = _open_conta_by_numeromesa(
+                        leftover = _open_conta_by_numeromesa(
                             cur, mesa_table, requested_mesa_int, None
                         )
+                        if leftover:
+                            _promote_conta_to_mesa(
+                                cur,
+                                mesa_table,
+                                leftover["id"],
+                                tipopedido,
+                                contamesa,
+                            )
+                            open_conta = leftover
+                            logger.info(
+                                "UniPlus: promoveu conta %s de tipopedido=%s para mesa %s",
+                                leftover["id"],
+                                leftover.get("tipopedido"),
+                                requested_mesa_int,
+                            )
                     if open_conta:
                         conta_id = open_conta["id"]
                         numeromesa = open_conta["numeromesa"]
