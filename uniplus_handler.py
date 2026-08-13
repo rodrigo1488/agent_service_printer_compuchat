@@ -107,7 +107,9 @@ def _cfg(db_module) -> Dict[str, str]:
     }
 
 
-def list_open_contas(db_module) -> List[Dict[str, Any]]:
+def list_open_contas(
+    db_module, tipopedido: Optional[int] = None
+) -> List[Dict[str, Any]]:
     """Contas abertas no Uniplus (status=1), indexadas por numeromesa."""
     if not is_uniplus_enabled(db_module) or psycopg2 is None:
         return []
@@ -122,13 +124,19 @@ def list_open_contas(db_module) -> List[Dict[str, Any]]:
                 cliente_expr = "nomecliente"
             elif "nome" in cols:
                 cliente_expr = "nome"
+            where = "status = 1 AND numeromesa IS NOT NULL"
+            params: List[Any] = []
+            if tipopedido is not None and "tipopedido" in cols:
+                where += " AND tipopedido = %s"
+                params.append(int(tipopedido))
             cur.execute(
                 f"""
                 SELECT numeromesa, {cliente_expr} AS cliente
                 FROM {mesa_table}
-                WHERE status = 1 AND numeromesa IS NOT NULL
+                WHERE {where}
                 ORDER BY id DESC
-                """
+                """,
+                params,
             )
             seen = set()
             out: List[Dict[str, Any]] = []

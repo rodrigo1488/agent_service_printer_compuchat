@@ -231,7 +231,7 @@ def _mesas_com_status_uniplus() -> List[Dict[str, Any]]:
     mesas = db.list_pos_mesas()
     open_by_num: Dict[int, Dict[str, Any]] = {}
     try:
-        for conta in list_open_contas(db):
+        for conta in list_open_contas(db, tipopedido=1):
             open_by_num[int(conta["numeromesa"])] = conta
     except Exception as exc:
         print(f"[POS] status Uniplus indisponível: {exc}")
