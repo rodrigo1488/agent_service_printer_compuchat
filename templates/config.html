@@ -252,8 +252,11 @@
         <button type="submit">Salvar configuração</button>
     </div>
 </form>
-<form method="post" action="/pos/catalog-sync" style="margin-top: 0.75rem;">
+<form method="post" action="/pos/catalog-sync" style="margin-top: 0.75rem; display: inline-block; margin-right: 0.5rem;">
     <button type="submit" class="btn-ghost">Sincronizar catálogo POS agora</button>
+</form>
+<form method="post" action="/pos/images-sync" style="margin-top: 0.75rem; display: inline-block;">
+    <button type="submit" class="btn-ghost">Forçar download das imagens</button>
 </form>
 
 <template id="printer-block-tpl">

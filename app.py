@@ -334,6 +334,32 @@ def pos_catalog_sync_ui():
         )
 
 
+@app.route("/pos/images-sync", methods=["POST"])
+def pos_images_sync_ui():
+    """Força o download das imagens do catálogo cloud."""
+    try:
+        from pos_catalog import sync_images_from_cloud
+
+        result = sync_images_from_cloud(force=True)
+        stats = result.get("images") or {}
+        return redirect(
+            url_for(
+                "index",
+                message=(
+                    f"Imagens POS: {stats.get('downloaded', 0)} baixadas, "
+                    f"{stats.get('failed', 0)} falhas."
+                ),
+                message_type="success",
+            )
+            + "#pos"
+        )
+    except Exception as e:
+        return redirect(
+            url_for("index", message=f"Falha ao baixar imagens: {e}", message_type="error")
+            + "#pos"
+        )
+
+
 @app.route("/health", methods=["GET"])
 def health():
     """Health check JSON para monitoramento."""
