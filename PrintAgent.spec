@@ -25,6 +25,7 @@ a = Analysis(
         'printer_service',
         'receipt_formatter',
         'error_recovery',
+        'notifications',
         'tray',
         # Windows (ignorados no Linux se o pacote não existir)
         'win32print',

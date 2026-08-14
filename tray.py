@@ -113,6 +113,12 @@ def run_tray(run_flask_callable):
 
     def on_sair(icon, item):
         stop_agent()
+        try:
+            from notifications import clear_tray_icon
+
+            clear_tray_icon()
+        except Exception:
+            pass
         icon.stop()
         if hasattr(sys.stdout, "close"):
             sys.stdout.close()
@@ -128,6 +134,12 @@ def run_tray(run_flask_callable):
         pystray.MenuItem("Sair", on_sair),
     )
     icon = pystray.Icon("print_agent", icon_image, "Print Agent", menu)
+    try:
+        from notifications import set_tray_icon
+
+        set_tray_icon(icon)
+    except Exception:
+        pass
     print(f"[INFO] Print Agent na bandeja. Log: {log_path}")
     print("[INFO] Interface: http://localhost:5000/")
     icon.run()

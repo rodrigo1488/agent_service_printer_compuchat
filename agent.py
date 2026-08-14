@@ -17,6 +17,7 @@ from error_recovery import (
     DataValidator,
     thread_monitor,
 )
+from notifications import notify_print_failure
 from uniplus_handler import (
     handle_uniplus_job,
     is_uniplus_enabled,
@@ -362,6 +363,11 @@ def _handle_print_job(ws, job_id: int, conteudo: dict, printer_config: dict):
                 )
                 _log("ERROR", f"Job {job_id}: {error_msg}")
                 db.add_print_log(job_id, "error", error_msg)
+                notify_print_failure(
+                    error_msg,
+                    protocol=(conteudo or {}).get("protocol") or "",
+                    job_id=job_id,
+                )
                 try:
                     ws.send(json.dumps({"event": "ack", "job_id": job_id, "status": "error", "message": error_msg}))
                 except Exception:
@@ -467,9 +473,15 @@ def _handle_print_job(ws, job_id: int, conteudo: dict, printer_config: dict):
             _log("INFO", f"Job {job_id} impresso com sucesso na impressora device_id={device_id}")
         else:
             _log("ERROR", f"Job {job_id} falhou na impressora device_id={device_id}: {message}")
+            notify_print_failure(message, protocol=protocol, job_id=job_id)
     except Exception as e:
         _log("ERROR", f"Job {job_id} erro na impressora device_id={device_id}: {str(e)}")
         db.add_print_log(job_id, "error", str(e))
+        notify_print_failure(
+            str(e),
+            protocol=(conteudo or {}).get("protocol") or "",
+            job_id=job_id,
+        )
         try:
             ws.send(json.dumps({"event": "ack", "job_id": job_id, "status": "error", "message": str(e)}))
         except Exception:
