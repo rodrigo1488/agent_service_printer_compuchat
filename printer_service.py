@@ -26,6 +26,39 @@ except ImportError:
 # Tamanho do módulo do QR (1-16). 10 = maior, mais fácil de escanear no celular.
 QR_MODULE_SIZE = 10
 
+# ESC/POS GS ! — escala de fonte no cupom (1=normal, 2=altura dupla, 3=largura+altura duplas)
+def _escpos_font_scale_command(scale: int) -> bytes:
+    s = min(3, max(1, int(scale or 1)))
+    if s == 1:
+        return b"\x1D\x21\x00"
+    if s == 2:
+        return b"\x1D\x21\x10"
+    return b"\x1D\x21\x11"
+
+
+def _layout_width_for_font_scale(paper_width: int, scale: int) -> int:
+    w = min(max(int(paper_width or 32), 24), 48)
+    if int(scale or 1) >= 3:
+        return max(12, w // 2)
+    return w
+
+
+def _escpos_pickup_banner(encoding: str = "cp850") -> bytes:
+    """Banner grande e centralizado para pedidos de retirada no balcão."""
+    try:
+        label = "RETIRADA".encode(encoding, errors="replace")
+    except LookupError:
+        label = "RETIRADA".encode("cp850", errors="replace")
+    cmd = b"\x1B\x61\x01"  # centralizar
+    cmd += b"\x1B\x45\x01"  # negrito
+    cmd += _escpos_font_scale_command(3)
+    cmd += b"\n\n"
+    cmd += label + b"\n\n"
+    cmd += _escpos_font_scale_command(1)
+    cmd += b"\x1B\x45\x00"
+    cmd += b"\x1B\x61\x00"
+    return cmd
+
 _active_lock = threading.Lock()
 _active_socks = []  # (key, socket)
 _cancel_gen = {}
@@ -211,19 +244,31 @@ class PrinterService:
             print(f"[WARN] Timeout aguardando fila da impressora {key}")
             return False
         try:
+            scale = min(3, max(1, int(receipt_data.get("font_scale") or 1)))
+            is_pickup = bool(receipt_data.get("is_pickup"))
             receipt_text = self._generate_receipt_text(receipt_data)
             qr_bytes = b""
-            if receipt_data.get("delivery_scan_url"):
+            if not is_pickup and receipt_data.get("delivery_scan_url"):
                 qr_bytes = _escpos_qr_bytes(
                     receipt_data["delivery_scan_url"],
                     receipt_data.get("qr_module_size"),
                 )
+            pickup_bytes = b""
+            if is_pickup:
+                _, encoding = self._get_esc_pos_encoding()
+                pickup_bytes = _escpos_pickup_banner(encoding)
 
             if self.connection_type == "local":
-                return self._print_via_local(receipt_text, qr_bytes=qr_bytes)
+                return self._print_via_local(
+                    receipt_text, qr_bytes=qr_bytes, pickup_bytes=pickup_bytes, font_scale=scale
+                )
             if self.printer_type == "ipp":
-                return self._print_via_ipp(receipt_text, qr_bytes=qr_bytes)
-            return self._print_via_raw(receipt_text, qr_bytes=qr_bytes)
+                return self._print_via_ipp(
+                    receipt_text, qr_bytes=qr_bytes, pickup_bytes=pickup_bytes, font_scale=scale
+                )
+            return self._print_via_raw(
+                receipt_text, qr_bytes=qr_bytes, pickup_bytes=pickup_bytes, font_scale=scale
+            )
         except Exception as e:
             print(f"Erro ao imprimir: {str(e)}")
             return False
@@ -232,7 +277,8 @@ class PrinterService:
     
     def _generate_receipt_text(self, receipt):
         """Gera o texto formatado do recibo"""
-        W = min(max(self.paper_width, 24), 48)  # 24-48 caracteres
+        scale = min(3, max(1, int(receipt.get("font_scale") or 1)))
+        W = _layout_width_for_font_scale(self.paper_width, scale)
         lines = []
 
         # Cabeçalho (pedidos de mesa: não imprimir título do form)
@@ -406,9 +452,11 @@ class PrinterService:
             self.printer_name_local,
         )
 
-    def _print_via_raw(self, text, qr_bytes=b""):
+    def _print_via_raw(self, text, qr_bytes=b"", pickup_bytes=b"", font_scale=1):
         """Imprime via socket RAW (porta 9100). qr_bytes: opcional, QR ESC/POS."""
         epoch = _generation(self._printer_key())
+        font_cmd = _escpos_font_scale_command(font_scale)
+        font_reset = b"\x1D\x21\x00"
 
         @retry_with_backoff(RetryConfig(
             max_retries=self.max_retries,
@@ -424,7 +472,16 @@ class PrinterService:
             text_bytes = self._encode_text_with_fallback(text)
             esc_pos_reset = b"\x1B\x40"
             esc_pos_cut = b"\x1D\x56\x00"
-            full_command = esc_pos_reset + esc_encoding + text_bytes + qr_bytes + esc_pos_cut
+            full_command = (
+                esc_pos_reset
+                + font_cmd
+                + esc_encoding
+                + text_bytes
+                + pickup_bytes
+                + qr_bytes
+                + font_reset
+                + esc_pos_cut
+            )
             
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
@@ -463,14 +520,15 @@ class PrinterService:
             print(f"Erro ao imprimir via RAW: {str(e)}")
             return False
     
-    def _print_via_ipp(self, text, qr_bytes=b""):
-        """Imprime via IPP. qr_bytes: opcional."""
+    def _print_via_ipp(self, text, qr_bytes=b"", pickup_bytes=b"", font_scale=1):
+        """Imprime via IPP. qr_bytes: opcional. font_scale ignorado (IPP não aplica GS !)."""
+        _ = font_scale
         try:
             _, encoding = self._get_esc_pos_encoding()
             text_bytes = text.encode(encoding, errors="replace")
             conn = http.client.HTTPConnection(self.printer_ip, self.printer_port, timeout=5)
             headers = {"Content-Type": "application/ipp"}
-            ipp_payload = self._create_ipp_request(text_bytes + qr_bytes)
+            ipp_payload = self._create_ipp_request(text_bytes + pickup_bytes + qr_bytes)
             headers["Content-Length"] = str(len(ipp_payload))
             conn.request("POST", "/ipp/print", ipp_payload, headers)
             response = conn.getresponse()
@@ -513,7 +571,7 @@ class PrinterService:
         
         return ipp_request
     
-    def _print_via_local(self, text, qr_bytes=b""):
+    def _print_via_local(self, text, qr_bytes=b"", pickup_bytes=b"", font_scale=1):
         """Imprime via impressora local do Windows usando win32print com comandos ESC/POS."""
         if not HAS_WIN32PRINT:
             print("Erro: win32print não disponível. Apenas Windows suporta impressoras locais.")
@@ -538,12 +596,12 @@ class PrinterService:
             # 0x56 = V (comando de corte)
             # 0x00 = modo de corte (0 = corte total)
             esc_pos_cut = b"\x1D\x56\x00"
-            
-            # Comando ESC @ para inicializar a impressora
             esc_pos_init = b"\x1B\x40"
-            
-            # Combinar inicialização, texto, QR bytes e comando de corte
-            full_content = esc_pos_init + text_bytes + qr_bytes + esc_pos_cut
+            font_cmd = _escpos_font_scale_command(font_scale)
+            font_reset = b"\x1D\x21\x00"
+            full_content = (
+                esc_pos_init + font_cmd + text_bytes + pickup_bytes + qr_bytes + font_reset + esc_pos_cut
+            )
             
             # Abrir a impressora local
             printer_handle = win32print.OpenPrinter(self.printer_name_local)

@@ -37,6 +37,36 @@ def format_order_receipt(data: dict) -> dict:
     except (TypeError, ValueError):
         qr_module_size = 10
     qr_module_size = min(16, max(4, qr_module_size))
+    try:
+        font_scale = int(data.get("printFontScale") or 1)
+    except (TypeError, ValueError):
+        font_scale = 1
+    font_scale = min(3, max(1, font_scale))
+
+    fulfillment_mode = str(data.get("fulfillmentMode") or "").strip().lower()
+    if not fulfillment_mode and isinstance(data.get("metadata"), dict):
+        fulfillment_mode = str(
+            (data.get("metadata") or {}).get("fulfillmentMode") or ""
+        ).strip().lower()
+    is_pickup = (
+        fulfillment_mode == "pickup"
+        or data.get("pickup") is True
+        or data.get("retirada") is True
+    )
+    if not is_pickup:
+        for answer in answers:
+            label = str(answer.get("label", "")).lower()
+            if "tipo" in label and ("pedido" in label or "entrega" in label):
+                val = str(answer.get("answer", "")).lower()
+                if any(
+                    token in val
+                    for token in ("retirada", "balcão", "balcao", "local", "pickup", "buscar")
+                ):
+                    is_pickup = True
+                    break
+    if is_pickup:
+        delivery_scan_token = ""
+        delivery_scan_url = ""
 
     try:
         if isinstance(submitted_at, (int, float)):
@@ -150,4 +180,7 @@ def format_order_receipt(data: dict) -> dict:
         "delivery_scan_token": delivery_scan_token,
         "delivery_scan_url": delivery_scan_url,
         "qr_module_size": qr_module_size,
+        "font_scale": font_scale,
+        "is_pickup": is_pickup,
+        "fulfillment_mode": fulfillment_mode or ("pickup" if is_pickup else ""),
     }
