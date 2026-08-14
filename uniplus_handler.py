@@ -594,7 +594,6 @@ def _resolve_produto_id(
     Ordem:
     1) Match exato em produto.codigo (campo visível ao usuário)
     2) Se o valor bater no id interno, erro orientando a usar o codigo
-    3) Fallback por nome (último recurso)
     """
     table = cfg["produto_table"]
     codigo_col = cfg["produto_codigo_column"]
@@ -630,42 +629,6 @@ def _resolve_produto_id(
                     f"informado id interno={rid}; use o codigo visível={rc or '-'} "
                     "(campo codigo do cadastro UniPlus)"
                 )
-
-    needle = _normalize_nome(nome)
-    nome_col = _produto_nome_column(cur, table) if needle else ""
-    if needle and nome_col:
-        token = needle.split(" ")[0]
-        if len(token) >= 3:
-            cur.execute(
-                f"""
-                SELECT {id_col} AS id, {codigo_col} AS codigo, {nome_col} AS nome
-                FROM {table}
-                WHERE lower(CAST({nome_col} AS text)) LIKE %s
-                LIMIT 50
-                """,
-                (f"%{token}%",),
-            )
-            rows = cur.fetchall() or []
-            best = None
-            best_len = -1
-            for row in rows:
-                if isinstance(row, dict):
-                    rid = int(row["id"])
-                    rc = str(row.get("codigo") or "").strip()
-                    rnome = str(row.get("nome") or "")
-                else:
-                    rid = int(row[0])
-                    rc = str(row[1] or "").strip()
-                    rnome = str(row[2] or "")
-                pname = _normalize_nome(rnome)
-                if not pname:
-                    continue
-                if needle == pname or needle in pname or pname in needle:
-                    if len(pname) > best_len:
-                        best = (rid, rc or codigo or token)
-                        best_len = len(pname)
-            if best:
-                return best
 
     raise UniplusPermanentError(
         f"ERR_UNIPLUS_PRODUCT_NOT_FOUND: codigo={codigo or '-'} nome={nome or '-'} "
@@ -1198,8 +1161,7 @@ def handle_uniplus_job(db_module, conteudo: Dict[str, Any]) -> Dict[str, Any]:
     try:
         with conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                # Lock global de numeromesa + lock do protocol (idempotência)
-                cur.execute("SELECT pg_advisory_xact_lock(%s)", (872014001,))
+                # Lock do protocol (idempotência)
                 cur.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (protocol_key,))
 
                 existing_result = _existing_by_protocol(cur, mesa_table, protocol_key, summary)
@@ -1235,10 +1197,8 @@ def handle_uniplus_job(db_module, conteudo: Dict[str, Any]) -> Dict[str, Any]:
                     or ""
                 ).strip().lower()
                 requested_mesa_int = parse_numeromesa(contamesa.get("numeromesa"))
-                if not requested_mesa_int:
-                    requested_mesa_int = parse_numeromesa(contamesa.get("nome"))
-                if not requested_mesa_int:
-                    requested_mesa_int = parse_numeromesa(contamesa.get("obs"))
+                if not requested_mesa_int and order_type == "mesa":
+                    requested_mesa_int = parse_numeromesa(conteudo.get("numeromesa"))
 
                 if order_type == "mesa":
                     try:
@@ -1248,6 +1208,14 @@ def handle_uniplus_job(db_module, conteudo: Dict[str, Any]) -> Dict[str, Any]:
                     if mesa_tipopedido == 0:
                         mesa_tipopedido = 1
                     contamesa["tipopedido"] = mesa_tipopedido
+
+                if order_type == "mesa" and requested_mesa_int and requested_mesa_int > 0:
+                    cur.execute(
+                        "SELECT pg_advisory_xact_lock(%s, %s)",
+                        (872014002, int(requested_mesa_int)),
+                    )
+                elif order_type != "mesa":
+                    cur.execute("SELECT pg_advisory_xact_lock(%s)", (872014001,))
 
                 if order_type == "mesa" and requested_mesa_int and requested_mesa_int > 0:
                     tipopedido = int(contamesa.get("tipopedido") or 1)

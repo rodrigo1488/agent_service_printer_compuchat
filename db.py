@@ -840,6 +840,29 @@ def get_pos_order(client_order_id: str) -> Optional[Dict[str, Any]]:
         conn.close()
 
 
+def claim_pos_order(client_order_id: str) -> Optional[Dict[str, Any]]:
+    """Reserva clientOrderId com lock imediato — evita duplicata sob retry paralelo."""
+    conn = _get_connection()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT result_json FROM pos_orders_queue WHERE client_order_id = ?",
+            (client_order_id,),
+        ).fetchone()
+        if row:
+            conn.commit()
+            data = _json_load(row[0], None)
+            return data if isinstance(data, dict) else None
+        conn.execute(
+            "INSERT INTO pos_orders_queue (client_order_id, result_json) VALUES (?, ?)",
+            (client_order_id, json.dumps({"pending": True}, ensure_ascii=False)),
+        )
+        conn.commit()
+        return None
+    finally:
+        conn.close()
+
+
 def save_pos_order(client_order_id: str, result: Dict[str, Any]) -> None:
     conn = _get_connection()
     try:

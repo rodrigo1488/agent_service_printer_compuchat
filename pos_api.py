@@ -84,7 +84,12 @@ def _build_uniplus_items(menu_items: List[Dict[str, Any]], protocol: str) -> Lis
         nome = str(item.get("productName") or (product or {}).get("name") or "Item")[:120]
         codigo = str(item.get("idUniplus") or "")
         if not codigo and product:
-            codigo = _option_codigo(product, item.get("optionId") or item.get("baseOptionId"))
+            codigo = _option_codigo(
+                product,
+                item.get("optionId")
+                or item.get("variationOptionId")
+                or item.get("baseOptionId"),
+            )
         unit = float(item.get("productValue") or (product or {}).get("value") or 0)
         addons = item.get("addons") or []
         addons_total = 0.0
@@ -585,8 +590,10 @@ def pos_ocupar(mesa_id: int):
 def pos_orders():
     body = request.get_json(silent=True) or {}
     client_order_id = str(body.get("clientOrderId") or "").strip() or str(uuid.uuid4())
-    existing = db.get_pos_order(client_order_id)
+    existing = db.claim_pos_order(client_order_id)
     if existing:
+        if existing.get("pending"):
+            return jsonify({"error": "order_in_progress", "clientOrderId": client_order_id}), 409
         if existing.get("ok") and not existing.get("printed"):
             print_payload = _order_print_payload(body, existing)
             print_info = _print_kitchen(print_payload)
