@@ -242,6 +242,11 @@ class PrinterService:
             lines.append(f" Tel: {receipt['customer']['phone'][:W-6]}")
         if receipt['customer']['email']:
             lines.append(f" {receipt['customer']['email'][:W-2]}")
+        # Campos configurados no Form Builder (aba Impressão) saem junto ao cliente
+        for key, value in (receipt.get('custom_info') or {}).items():
+            text = f" {key}: {str(value).strip()}"
+            for wrap_line in _wrap_text_by_words(text, W) or [text[:W]]:
+                lines.append(wrap_line[:W])
         lines.append("")
         lines.append("-" * W)
         lines.append("")
@@ -306,13 +311,6 @@ class PrinterService:
 
         lines.append("-" * W)
         lines.append("")
-
-        # Informações adicionais
-        if receipt['custom_info']:
-            lines.append("OBS:")
-            for key, value in receipt['custom_info'].items():
-                lines.append(f" {key}: {str(value)[:W-4]}")
-            lines.append("")
 
         # Taxa de entrega (pedidos delivery): mostrar sempre que for delivery ou valor > 0
         delivery_fee = float(receipt.get("delivery_fee") or 0)
