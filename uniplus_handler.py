@@ -233,6 +233,10 @@ def get_open_mesa_conta(db_module, numeromesa: int) -> Dict[str, Any]:
                 selects.append("observacao")
             if "precounitario" in item_cols:
                 selects.append("precounitario")
+            if "idproduto" in item_cols:
+                selects.append("idproduto")
+            if "codigoproduto" in item_cols:
+                selects.append("codigoproduto")
             if "datahoralancamento" in item_cols:
                 selects.append("datahoralancamento")
             if "horaabertura" in item_cols:
@@ -250,6 +254,11 @@ def get_open_mesa_conta(db_module, numeromesa: int) -> Dict[str, Any]:
             )
             itens = []
             for it in cur.fetchall() or []:
+                idproduto = it.get("idproduto")
+                try:
+                    idproduto_val = int(idproduto) if idproduto is not None else None
+                except (TypeError, ValueError):
+                    idproduto_val = None
                 itens.append(
                     {
                         "nomeproduto": str(it.get("nomeproduto") or "").strip(),
@@ -258,6 +267,8 @@ def get_open_mesa_conta(db_module, numeromesa: int) -> Dict[str, Any]:
                         "precounitario": float(it.get("precounitario") or 0),
                         "observacao": str(it.get("observacao") or "").strip(),
                         "hora": _format_conta_hora(it),
+                        "idproduto": idproduto_val,
+                        "codigoproduto": str(it.get("codigoproduto") or "").strip(),
                     }
                 )
             return {
