@@ -1101,30 +1101,23 @@ def test_printer():
 
 @app.route("/api/cancel-print-queue", methods=["POST"])
 def cancel_print_queue():
-    """Cancela a fila de uma impressora (form do config) ou das salvas (device_id)."""
+    """Marca a fila como impressa (baixa no SaaS) e tenta limpar o buffer da térmica."""
     try:
         data = request.get_json(silent=True) or {}
         device_id = str(data.get("device_id") or data.get("deviceId") or "").strip()
+        from agent import mark_print_queue_done
+
         if device_id or data.get("all"):
-            from pos_api import _cancel_printer_queue, _printers_matching
-
-            targets = _printers_matching("" if data.get("all") else device_id)
-            if device_id and not targets:
-                return jsonify({"success": False, "error": "Impressora não encontrada"}), 404
-            if not targets:
-                return jsonify({"success": False, "error": "Nenhuma impressora configurada"}), 400
-            results = [_cancel_printer_queue(p) for p in targets]
-            ok = all(r.get("ok") for r in results)
-            msg = "; ".join(r.get("message") or "" for r in results)
-            return jsonify({"success": ok, "message": msg, "results": results})
-
-        from printer_service import PrinterService
-
-        printer = PrinterService.from_config(data, timeout=4, max_retries=0)
-        ok, message = printer.cancel_queue()
-        if ok:
-            return jsonify({"success": True, "message": message})
-        return jsonify({"success": False, "error": message, "message": message})
+            info = mark_print_queue_done("" if data.get("all") else device_id)
+        else:
+            info = mark_print_queue_done(printer_cfg=data)
+        ok = bool(info.get("ok"))
+        return jsonify({
+            "success": ok,
+            "message": info.get("message") or ("Fila marcada como impressa" if ok else "Falha ao limpar a fila"),
+            "drained": info.get("drained") or 0,
+            "seconds": info.get("seconds") or 0,
+        })
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
 

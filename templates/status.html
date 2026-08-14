@@ -161,7 +161,7 @@
             {% else %}
             <span class="badge badge-error">Indisponível</span>
             {% endif %}
-            <button type="button" class="btn btn-ghost btn-cancel-queue" data-device-id="{{ p.device_id }}">Cancelar fila</button>
+            <button type="button" class="btn btn-ghost btn-cancel-queue" data-device-id="{{ p.device_id }}">Marcar fila como impressa</button>
         </div>
         {% endfor %}
     </div>
@@ -171,7 +171,7 @@
 </div>
 
 <div class="actions">
-    <button type="button" class="btn btn-ghost" id="btn-cancel-all-queues">Cancelar fila de todas</button>
+    <button type="button" class="btn btn-ghost" id="btn-cancel-all-queues">Marcar todas como impressas</button>
     <a href="/health" class="btn btn-ghost" target="_blank" rel="noopener">Ver JSON /health</a>
     <a href="/logs" class="btn btn-secondary">Abrir logs</a>
     <a href="/" class="btn">Ir para configuração</a>
@@ -183,7 +183,7 @@
 (function() {
     function cancelQueue(payload, btn) {
         var original = btn ? btn.textContent : '';
-        if (btn) { btn.disabled = true; btn.textContent = 'Cancelando...'; }
+        if (btn) { btn.disabled = true; btn.textContent = 'Marcando...'; }
         return fetch('/api/cancel-print-queue', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -203,14 +203,14 @@
         btn.addEventListener('click', function() {
             var id = btn.getAttribute('data-device-id') || '';
             if (!id) { alert('Impressora sem Device ID'); return; }
-            if (!confirm('Cancelar a fila desta impressora?')) return;
+            if (!confirm('Marcar a fila desta impressora como impressa? Cupons pendentes não serão reenviados.')) return;
             cancelQueue({ device_id: id }, btn);
         });
     });
     var allBtn = document.getElementById('btn-cancel-all-queues');
     if (allBtn) {
         allBtn.addEventListener('click', function() {
-            if (!confirm('Cancelar a fila de todas as impressoras?')) return;
+            if (!confirm('Marcar a fila de todas as impressoras como impressa?')) return;
             cancelQueue({ all: true }, allBtn);
         });
     }

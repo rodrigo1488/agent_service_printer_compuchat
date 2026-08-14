@@ -46,6 +46,10 @@ _active_websockets_lock = threading.Lock()
 # Janela de tolerÃ¢ncia para quedas momentÃ¢neas da impressora/rede
 PRINTER_RECOVERY_WAIT_SECONDS = 90
 PRINTER_RECOVERY_CHECK_INTERVAL = 5
+PRINT_DRAIN_SECONDS = 120
+
+_device_drain_lock = threading.Lock()
+_device_drain_until = {}
 
 # WebSocket: não verificar certificado SSL (evita CERTIFICATE_VERIFY_FAILED com servidor com cert autoassinado).
 SSLOPT_WS = {"cert_reqs": ssl.CERT_NONE}
@@ -99,8 +103,23 @@ def _unregister_websocket(device_id: str, ws):
             _active_websockets.pop(device_id, None)
 
 
+def _close_websocket(device_id: str):
+    """Fecha o WebSocket de um device para forçar reconexão (e redispatch da fila no SaaS)."""
+    did = (device_id or "").strip()
+    if not did:
+        return
+    with _active_websockets_lock:
+        ws = _active_websockets.get(did)
+    if not ws:
+        return
+    try:
+        ws.close()
+    except Exception:
+        pass
+
+
 def _close_all_websockets():
-    """Fecha todas as conexÃµes WebSocket ativas para forÃ§ar reconexÃ£o/parada imediata."""
+    """Fecha todas as conexões WebSocket ativas para forçar reconexão/parada imediata."""
     with _active_websockets_lock:
         to_close = list(_active_websockets.values())
         _active_websockets.clear()
@@ -110,6 +129,97 @@ def _close_all_websockets():
             ws.close()
         except Exception:
             pass
+
+
+def _start_device_drain(device_id: str, seconds: int = PRINT_DRAIN_SECONDS):
+    did = (device_id or "").strip().lower()
+    if not did:
+        return
+    with _device_drain_lock:
+        _device_drain_until[did] = time.monotonic() + max(1, int(seconds or PRINT_DRAIN_SECONDS))
+
+
+def _is_device_draining(device_id: str) -> bool:
+    did = (device_id or "").strip().lower()
+    if not did:
+        return False
+    with _device_drain_lock:
+        until = _device_drain_until.get(did, 0)
+    return time.monotonic() < until
+
+
+def _ack_print_done(ws, job_id: int, message: str):
+    try:
+        ws.send(json.dumps({
+            "event": "ack",
+            "job_id": job_id,
+            "status": "done",
+            "message": message,
+        }))
+    except Exception as e:
+        _log("ERROR", f"Erro ao enviar ACK done do job {job_id}: {e}")
+
+
+def _printers_for_drain(device_id: str = ""):
+    printers = list(db.get_printers() or [])
+    want = (device_id or "").strip().lower()
+    if not want:
+        return printers
+    return [
+        p for p in printers
+        if str(p.get("device_id") or "").strip().lower() == want
+    ]
+
+
+def mark_print_queue_done(device_id: str = "", printer_cfg: dict = None) -> dict:
+    """
+    Dá baixa na fila: para de enviar cupons, marca jobs como impressos no SaaS
+    e reconecta o WebSocket para o servidor despachar o que ainda estava pending.
+    """
+    from printer_service import PrinterService, start_print_drain_for_config
+
+    did = (device_id or "").strip()
+    if not did and printer_cfg:
+        did = str(printer_cfg.get("device_id") or printer_cfg.get("deviceId") or "").strip()
+    targets = list(_printers_for_drain(did)) if did else []
+    if not did and printer_cfg:
+        ip = str(printer_cfg.get("printer_ip") or "").strip().lower()
+        if ip:
+            targets = [
+                p for p in (db.get_printers() or [])
+                if str(p.get("printer_ip") or "").strip().lower() == ip
+            ]
+        if not targets:
+            targets = [printer_cfg]
+    elif did and not targets and printer_cfg:
+        targets = [printer_cfg]
+    elif not did and not printer_cfg:
+        targets = list(_printers_for_drain(""))
+    if not targets:
+        return {"ok": False, "drained": 0, "message": "Nenhuma impressora configurada"}
+
+    drained = 0
+    for cfg in targets:
+        start_print_drain_for_config(cfg, PRINT_DRAIN_SECONDS)
+        did = str(cfg.get("device_id") or "").strip()
+        _start_device_drain(did, PRINT_DRAIN_SECONDS)
+        _close_websocket(did)
+        try:
+            PrinterService.from_config(cfg, timeout=2, max_retries=0).cancel_queue()
+        except Exception as exc:
+            _log("WARN", f"clear buffer ao marcar impresso: {exc}")
+        drained += 1
+        _log("INFO", f"Fila marcada como impressa (device_id={did or '-'}, {PRINT_DRAIN_SECONDS}s)")
+
+    return {
+        "ok": True,
+        "drained": drained,
+        "seconds": PRINT_DRAIN_SECONDS,
+        "message": (
+            f"{drained} impressora(s): fila marcada como impressa. "
+            "Cupons pendentes no servidor serão baixados e não reenviados."
+        ),
+    }
 
 
 def _get_latest_printer_config(device_id: str, fallback_config: dict) -> dict:
@@ -207,6 +317,15 @@ def _handle_print_job(ws, job_id: int, conteudo: dict, printer_config: dict):
     printer_ip = latest_config.get("printer_ip", "192.168.1.100")
     printer_port = int(latest_config.get("printer_port") or 9100)
 
+    from printer_service import is_print_draining_for_config
+
+    if _is_device_draining(device_id) or is_print_draining_for_config(latest_config):
+        msg = "Marcado como impresso (fila limpa)"
+        db.add_print_log(job_id, "done", msg)
+        _ack_print_done(ws, job_id, msg)
+        _log("INFO", f"Job {job_id}: {msg} device_id={device_id}")
+        return
+
     connection_type = latest_config.get("connection_type") or "network"
     if connection_type == "local":
         printer_name_local = latest_config.get("printer_name_local", "")
@@ -218,6 +337,12 @@ def _handle_print_job(ws, job_id: int, conteudo: dict, printer_config: dict):
     if connection_type == "network":
         start_wait = time.time()
         while not _should_stop and not ConnectionHealthChecker.check_printer_connection(printer_ip, printer_port):
+            if _is_device_draining(device_id) or is_print_draining_for_config(latest_config):
+                msg = "Marcado como impresso (fila limpa)"
+                db.add_print_log(job_id, "done", msg)
+                _ack_print_done(ws, job_id, msg)
+                _log("INFO", f"Job {job_id}: {msg} device_id={device_id}")
+                return
             elapsed = int(time.time() - start_wait)
             if elapsed >= PRINTER_RECOVERY_WAIT_SECONDS:
                 error_msg = (
@@ -366,6 +491,14 @@ def _make_on_message(printer_config: dict):
                 job_id = data.get("job_id")
                 conteudo = data.get("conteudo", {})
                 if job_id is not None and conteudo:
+                    from printer_service import is_print_draining_for_config
+
+                    if _is_device_draining(printer_config.get("device_id")) or is_print_draining_for_config(printer_config):
+                        msg = "Marcado como impresso (fila limpa)"
+                        db.add_print_log(job_id, "done", msg)
+                        _ack_print_done(ws, job_id, msg)
+                        _log("INFO", f"Job {job_id}: {msg}")
+                        return
                     # Processar em thread separada para não bloquear loop WebSocket.
                     threading.Thread(
                         target=_handle_print_job,

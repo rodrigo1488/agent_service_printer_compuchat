@@ -183,7 +183,7 @@
                 </div>
                 <div class="printer-actions">
                     <button type="button" class="btn-test-printer btn-secondary" data-index="{{ loop.index0 }}">Testar impressora</button>
-                    <button type="button" class="btn-cancel-queue btn-ghost" data-index="{{ loop.index0 }}">Cancelar fila</button>
+                    <button type="button" class="btn-cancel-queue btn-ghost" data-index="{{ loop.index0 }}">Marcar fila como impressa</button>
                     <button type="button" class="btn-remove btn-danger" aria-label="Remover impressora">Remover</button>
                 </div>
             </div>
@@ -399,7 +399,7 @@
         </div>
         <div class="printer-actions">
             <button type="button" class="btn-test-printer btn-secondary" data-index="X">Testar impressora</button>
-            <button type="button" class="btn-cancel-queue btn-ghost" data-index="X">Cancelar fila</button>
+            <button type="button" class="btn-cancel-queue btn-ghost" data-index="X">Marcar fila como impressa</button>
             <button type="button" class="btn-remove btn-danger" aria-label="Remover impressora">Remover</button>
         </div>
     </div>
@@ -502,6 +502,8 @@
             paper_width: block.querySelector('[name="' + prefix + 'paper_width"]').value || '32',
             printer_encoding: block.querySelector('[name="' + prefix + 'printer_encoding"]').value || 'cp850',
         };
+        var deviceInput = block.querySelector('[name="' + prefix + 'device_id"]');
+        if (deviceInput && deviceInput.value) payload.device_id = deviceInput.value.trim();
         if (connectionType === 'local') {
             var printerNameLocal = block.querySelector('[name="' + prefix + 'printer_name_local"]').value;
             if (!printerNameLocal) { alert('Selecione uma impressora local primeiro'); return null; }
@@ -548,11 +550,11 @@
         var btn = block.querySelector('.btn-cancel-queue');
         if (!btn) return;
         btn.addEventListener('click', function() {
-            if (!confirm('Cancelar a fila desta impressora? Cupons ainda na memória serão descartados.')) return;
+            if (!confirm('Marcar a fila desta impressora como impressa? Os cupons pendentes não serão reenviados. O que já estiver no papel pode continuar saindo.')) return;
             var payload = printerPayload(block, btn.getAttribute('data-index'));
             if (!payload) return;
             btn.disabled = true;
-            btn.textContent = 'Cancelando...';
+            btn.textContent = 'Marcando...';
             fetch('/api/cancel-print-queue', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -568,7 +570,7 @@
             .catch(function(error) { alert('✗ Erro ao conectar: ' + error.message); })
             .finally(function() {
                 btn.disabled = false;
-                btn.textContent = 'Cancelar fila';
+                btn.textContent = 'Marcar fila como impressa';
             });
         });
     }

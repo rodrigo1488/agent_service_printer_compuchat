@@ -88,6 +88,31 @@ def _close_active_socks(key):
     return closed
 
 
+_drain_until = {}
+
+
+def _is_draining_key(key) -> bool:
+    with _active_lock:
+        until = _drain_until.get(key, 0)
+    return time.monotonic() < until
+
+
+def start_print_drain_for_config(cfg, seconds=120):
+    """Para o envio e trata novos cupons como já impressos por alguns segundos."""
+    svc = PrinterService.from_config(cfg or {}, timeout=2, max_retries=0)
+    key = svc._printer_key()
+    _bump_cancel(key)
+    closed = _close_active_socks(key)
+    with _active_lock:
+        _drain_until[key] = time.monotonic() + max(1, int(seconds or 120))
+    return key, closed
+
+
+def is_print_draining_for_config(cfg) -> bool:
+    svc = PrinterService.from_config(cfg or {}, timeout=2, max_retries=0)
+    return _is_draining_key(svc._printer_key())
+
+
 def _wrap_text_by_words(text: str, max_width: int) -> list:
     """Quebra texto por palavras para não cortar no meio; retorna lista de linhas."""
     if not text or max_width <= 0:
@@ -165,6 +190,9 @@ class PrinterService:
         Imprime o recibo do pedido.
         Para pedidos delivery, inclui QR/URL para o entregador adicionar à rota.
         """
+        if _is_draining_key(self._printer_key()):
+            print("[INFO] Fila marcada como impressa — não envia cupom")
+            return True
         try:
             receipt_text = self._generate_receipt_text(receipt_data)
             qr_bytes = b""
@@ -401,6 +429,9 @@ class PrinterService:
         try:
             return _send_to_printer()
         except _QueueCancelled:
+            if _is_draining_key(self._printer_key()):
+                print(f"[INFO] Fila marcada como impressa em {self.printer_ip}:{self.printer_port}")
+                return True
             print(f"Impressão cancelada em {self.printer_ip}:{self.printer_port}")
             return False
         except socket.timeout:

@@ -508,13 +508,14 @@ def pos_conta():
 def pos_cancel_print_queue():
     body = request.get_json(silent=True) or {}
     device_id = str(body.get("deviceId") or body.get("device_id") or "").strip()
-    targets = _printers_matching(device_id)
-    if device_id and not targets:
+    from agent import mark_print_queue_done
+
+    info = mark_print_queue_done(device_id)
+    if device_id and not info.get("drained"):
         return jsonify({"ok": False, "error": "printer_not_found", "results": []}), 404
-    if not targets:
-        return jsonify({"ok": False, "error": "no_printers", "results": []}), 400
-    results = [_cancel_printer_queue(p) for p in targets]
-    return jsonify({"ok": all(r.get("ok") for r in results), "results": results})
+    if not info.get("ok"):
+        return jsonify({"ok": False, "error": info.get("message") or "no_printers", "results": []}), 400
+    return jsonify({"ok": True, "message": info.get("message"), "drained": info.get("drained") or 0})
 
 
 @pos_bp.route("/pos/pedidos", methods=["GET"])
