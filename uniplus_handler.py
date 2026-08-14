@@ -316,6 +316,136 @@ def _format_conta_hora(it: Dict[str, Any]) -> str:
     return brasil.strftime("%d/%m %H:%M")
 
 
+def _brasil_today():
+    return (datetime.utcnow() - timedelta(hours=3)).date()
+
+
+def list_pedidos_dia(db_module, day=None) -> List[Dict[str, Any]]:
+    """Itens de mesa lançados no dia (Brasília), mais recentes primeiro."""
+    if not is_uniplus_enabled(db_module) or psycopg2 is None:
+        return []
+    alvo = day or _brasil_today()
+    cfg = _cfg(db_module)
+    conn = _connect(cfg["connection_string"])
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            mesa_table = cfg["contamesa_table"]
+            item_table = cfg["contamesaitem_table"]
+            mesa_cols = _table_columns(cur, mesa_table)
+            item_cols = _table_columns(cur, item_table)
+            if "idcontamesa" not in item_cols:
+                return []
+            cliente_expr = "NULL"
+            if "nomecliente" in mesa_cols:
+                cliente_expr = f"m.nomecliente"
+            elif "nome" in mesa_cols:
+                cliente_expr = "m.nome"
+            selects = [
+                "i.id AS id",
+                "m.numeromesa AS numeromesa",
+                f"{cliente_expr} AS cliente",
+            ]
+            for col, alias in (
+                ("nomeproduto", "nomeproduto"),
+                ("quantidade", "quantidade"),
+                ("observacao", "observacao"),
+                ("codigoproduto", "codigoproduto"),
+                ("entregue", "entregue"),
+                ("datahoralancamento", "datahoralancamento"),
+                ("horaabertura", "horaabertura"),
+                ("currenttimemillis", "currenttimemillis"),
+            ):
+                if col in item_cols:
+                    selects.append(f"i.{col} AS {alias}")
+            where = ["1=1"]
+            params: List[Any] = []
+            if "tipopedido" in mesa_cols:
+                where.append("m.tipopedido = 1")
+            if "cancelado" in item_cols:
+                where.append("COALESCE(i.cancelado, 0) = 0")
+            date_parts = []
+            day_txt = alvo.isoformat()
+            if "data" in item_cols:
+                date_parts.append("CAST(i.data AS date) = %s")
+                params.append(alvo)
+            if "datahoralancamento" in item_cols:
+                date_parts.append("CAST(i.datahoralancamento AS text) LIKE %s")
+                params.append(day_txt + "%")
+            if "data" in mesa_cols:
+                date_parts.append("CAST(m.data AS date) = %s")
+                params.append(alvo)
+            if "currenttimemillis" in item_cols:
+                start = datetime(alvo.year, alvo.month, alvo.day, 3, 0, 0, tzinfo=timezone.utc)
+                start_ms = int(start.timestamp() * 1000)
+                end_ms = start_ms + 24 * 60 * 60 * 1000
+                date_parts.append("(i.currenttimemillis >= %s AND i.currenttimemillis < %s)")
+                params.extend([start_ms, end_ms])
+            if date_parts:
+                where.append("(" + " OR ".join(date_parts) + ")")
+            order_col = "i.id DESC"
+            if "currenttimemillis" in item_cols:
+                order_col = "COALESCE(i.currenttimemillis, 0) DESC, i.id DESC"
+            cur.execute(
+                f"""
+                SELECT {", ".join(selects)}
+                FROM {item_table} i
+                JOIN {mesa_table} m ON m.id = i.idcontamesa
+                WHERE {" AND ".join(where)}
+                ORDER BY {order_col}
+                """,
+                params,
+            )
+            out: List[Dict[str, Any]] = []
+            for row in cur.fetchall() or []:
+                try:
+                    item_id = int(row.get("id") or 0)
+                    mesa = int(row.get("numeromesa") or 0)
+                except (TypeError, ValueError):
+                    continue
+                if item_id <= 0:
+                    continue
+                entregue = row.get("entregue")
+                out.append(
+                    {
+                        "id": item_id,
+                        "numeromesa": mesa,
+                        "cliente": str(row.get("cliente") or "").strip(),
+                        "nomeproduto": str(row.get("nomeproduto") or "").strip(),
+                        "quantidade": float(row.get("quantidade") or 0),
+                        "observacao": str(row.get("observacao") or "").strip(),
+                        "codigoproduto": str(row.get("codigoproduto") or "").strip(),
+                        "entregue": bool(int(entregue or 0)) if entregue is not None else False,
+                        "hora": _format_conta_hora(row),
+                        "currenttimemillis": int(row.get("currenttimemillis") or 0),
+                    }
+                )
+            return out
+    finally:
+        conn.close()
+
+
+def set_item_entregue(db_module, item_id: int, entregue: bool) -> bool:
+    if not is_uniplus_enabled(db_module) or psycopg2 is None:
+        return False
+    cfg = _cfg(db_module)
+    conn = _connect(cfg["connection_string"])
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            item_table = cfg["contamesaitem_table"]
+            cols = _table_columns(cur, item_table)
+            if "entregue" not in cols:
+                raise RuntimeError("coluna entregue ausente em contamesaitem")
+            cur.execute("SELECT pg_advisory_xact_lock(872014001)")
+            cur.execute(
+                f"UPDATE {item_table} SET entregue = %s WHERE id = %s",
+                (1 if entregue else 0, int(item_id)),
+            )
+            conn.commit()
+            return cur.rowcount > 0
+    finally:
+        conn.close()
+
+
 def is_uniplus_enabled(db_module) -> bool:
     enabled = (db_module.get_config("uniplus_enabled") or "false").lower()
     dsn = (db_module.get_config("uniplus_connection_string") or "").strip()

@@ -16,7 +16,9 @@ from uniplus_handler import (
     handle_uniplus_job,
     is_uniplus_enabled,
     list_open_contas,
+    list_pedidos_dia,
     parse_numeromesa,
+    set_item_entregue,
 )
 
 pos_bp = Blueprint("pos", __name__)
@@ -176,6 +178,59 @@ def _items_for_printer(items: List[Dict[str, Any]], group_names: List[str]) -> L
         return items
     want = {name.lower() for name in group_names}
     return [item for item in items if str(item.get("grupo") or "Outros").strip().lower() in want]
+
+
+def _grupo_by_codigo() -> Dict[str, str]:
+    out: Dict[str, str] = {}
+    for product in db.list_pos_products():
+        if not isinstance(product, dict):
+            continue
+        grupo = str(product.get("grupo") or "Outros").strip() or "Outros"
+        codigo = str(product.get("idUniplus") or "").strip()
+        if codigo:
+            out[codigo] = grupo
+        for variation in product.get("variations") or []:
+            if not isinstance(variation, dict):
+                continue
+            for opt in variation.get("options") or []:
+                if not isinstance(opt, dict):
+                    continue
+                oc = str(opt.get("idUniplus") or "").strip()
+                if oc:
+                    out[oc] = grupo
+        name = str(product.get("name") or "").strip().lower()
+        if name and name not in out:
+            out[f"name:{name}"] = grupo
+    return out
+
+
+def _printer_catalog() -> List[Dict[str, Any]]:
+    printers = []
+    for idx, p in enumerate(db.get_printers() or []):
+        device_id = str(p.get("device_id") or "").strip()
+        name = str(p.get("name") or "").strip() or device_id or f"Impressora {idx + 1}"
+        printers.append({"deviceId": device_id, "name": name})
+    return printers
+
+
+def _assign_printer(grupo: str, printers: List[Dict[str, Any]], routes: Dict[str, List[str]]) -> Dict[str, str]:
+    g = (grupo or "Outros").strip().lower()
+    if not printers:
+        return {"printerDeviceId": "", "printerName": "Pedidos"}
+    if not routes:
+        first = printers[0]
+        return {"printerDeviceId": first["deviceId"], "printerName": first["name"]}
+    leftover = None
+    for p in printers:
+        did = str(p.get("deviceId") or "").strip().lower()
+        groups = routes.get(did) or []
+        names = {str(x).strip().lower() for x in groups}
+        if "*" in names:
+            leftover = leftover or p
+        if g in names:
+            return {"printerDeviceId": p["deviceId"], "printerName": p["name"]}
+    target = leftover or printers[0]
+    return {"printerDeviceId": target["deviceId"], "printerName": target["name"]}
 
 
 def _send_receipt(printer_cfg: Dict[str, Any], payload: Dict[str, Any], *, timeout: int = 4) -> bool:
@@ -418,6 +473,56 @@ def pos_conta():
         return jsonify(get_open_mesa_conta(db, numeromesa))
     except Exception as exc:
         return jsonify({"error": str(exc), "open": False, "itens": []}), 502
+
+
+@pos_bp.route("/pos/pedidos", methods=["GET"])
+@_require_pos_token
+def pos_pedidos():
+    try:
+        itens = list_pedidos_dia(db)
+    except Exception as exc:
+        return jsonify({"error": str(exc), "itens": [], "printers": []}), 502
+    grupos = _grupo_by_codigo()
+    printers = _printer_catalog()
+    routes = _print_routes()
+    enriched = []
+    for item in itens:
+        codigo = str(item.get("codigoproduto") or "").strip()
+        nome = str(item.get("nomeproduto") or "").strip().lower()
+        grupo = grupos.get(codigo) or grupos.get(f"name:{nome}") or "Outros"
+        assigned = _assign_printer(grupo, printers, routes)
+        enriched.append(
+            {
+                "id": item["id"],
+                "numeromesa": item["numeromesa"],
+                "cliente": item.get("cliente") or "",
+                "nomeproduto": item.get("nomeproduto") or "",
+                "quantidade": item.get("quantidade") or 0,
+                "observacao": item.get("observacao") or "",
+                "hora": item.get("hora") or "",
+                "grupo": grupo,
+                "entregue": bool(item.get("entregue")),
+                "printerDeviceId": assigned["printerDeviceId"],
+                "printerName": assigned["printerName"],
+            }
+        )
+    return jsonify({"printers": printers, "itens": enriched})
+
+
+@pos_bp.route("/pos/pedidos/<int:item_id>/entregue", methods=["POST"])
+@_require_pos_token
+def pos_pedido_entregue(item_id: int):
+    body = request.get_json(silent=True) or {}
+    flag = body.get("entregue")
+    if flag is None:
+        flag = True
+    try:
+        ok = set_item_entregue(db, item_id, bool(flag))
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 502
+    if not ok:
+        return jsonify({"error": "item_not_found"}), 404
+    return jsonify({"ok": True, "id": item_id, "entregue": bool(flag)})
 
 
 @pos_bp.route("/pos/mesas/<int:mesa_id>/ocupar", methods=["POST"])
