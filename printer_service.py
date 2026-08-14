@@ -138,13 +138,14 @@ def _wrap_text_by_words(text: str, max_width: int) -> list:
     return lines
 
 
-def _escpos_qr_bytes(url: str) -> bytes:
+def _escpos_qr_bytes(url: str, module_size=None) -> bytes:
     """Gera bytes ESC/POS para imprimir QR code (URL para entregador), tamanho legível."""
     if not url or len(url) > 400:
         return b""
     try:
+        size = min(16, max(1, int(module_size or QR_MODULE_SIZE)))
         # GS ( k - Function 167: definir tamanho do módulo (n = 1-16; 10 = bem legível)
-        cmd = bytes([0x1D, 0x28, 0x6B, 0x03, 0x00, 0x31, 0x43, min(16, max(1, QR_MODULE_SIZE))])
+        cmd = bytes([0x1D, 0x28, 0x6B, 0x03, 0x00, 0x31, 0x43, size])
         # GS ( k - Function 169: nível de correção de erro (30 = L)
         cmd += b"\x1D\x28\x6B\x03\x00\x31\x45\x30"
         # GS ( k - Function 180: armazenar dados do QR
@@ -197,7 +198,10 @@ class PrinterService:
             receipt_text = self._generate_receipt_text(receipt_data)
             qr_bytes = b""
             if receipt_data.get("delivery_scan_url"):
-                qr_bytes = _escpos_qr_bytes(receipt_data["delivery_scan_url"])
+                qr_bytes = _escpos_qr_bytes(
+                    receipt_data["delivery_scan_url"],
+                    receipt_data.get("qr_module_size"),
+                )
 
             if self.connection_type == "local":
                 return self._print_via_local(receipt_text, qr_bytes=qr_bytes)

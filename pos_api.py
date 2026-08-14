@@ -19,6 +19,7 @@ from uniplus_handler import (
     list_pedidos_dia,
     parse_numeromesa,
     set_item_entregue,
+    update_open_mesa_cliente_name,
 )
 
 pos_bp = Blueprint("pos", __name__)
@@ -583,6 +584,69 @@ def pos_ocupar(mesa_id: int):
         return jsonify({"error": "mesa_not_found"}), 404
     updated = db.update_pos_mesa(mesa_id, status="ocupada", contact_name=customer_name)
     return jsonify({"mesa": updated})
+
+
+@pos_bp.route("/pos/mesas/<int:mesa_id>/contato-nome", methods=["PUT"])
+@_require_pos_token
+def pos_trocar_nome(mesa_id: int):
+    body = request.get_json(silent=True) or {}
+    customer_name = str(
+        body.get("customerName") or body.get("contactName") or ""
+    ).strip()
+    if not customer_name:
+        return jsonify({"error": "customer_name_required"}), 400
+
+    mesa = db.get_pos_mesa(mesa_id)
+    numeromesa = None
+    updated = None
+
+    if mesa:
+        numeromesa = parse_numeromesa(mesa.get("number")) or parse_numeromesa(
+            mesa.get("name")
+        )
+        updated = db.update_pos_mesa_contact_name(mesa_id, customer_name)
+        if updated:
+            updated["status"] = updated.get("status") or "ocupada"
+    elif mesa_id < 0:
+        numeromesa = abs(int(mesa_id))
+    else:
+        numeromesa = parse_numeromesa(body.get("tableNumber"))
+
+    uniplus_updated = False
+    if numeromesa is not None:
+        try:
+            tipopedido = int(db.get_config("uniplus_mesa_tipopedido") or 1)
+        except (TypeError, ValueError):
+            tipopedido = 1
+        if tipopedido == 0:
+            tipopedido = 1
+        try:
+            uniplus_updated = update_open_mesa_cliente_name(
+                db, int(numeromesa), customer_name, tipopedido=tipopedido
+            )
+        except Exception as exc:
+            print(f"[POS] Falha ao trocar nome Uniplus mesa {numeromesa}: {exc}")
+
+    if not mesa and not uniplus_updated:
+        return jsonify({"error": "mesa_not_found"}), 404
+
+    if updated is None and uniplus_updated:
+        updated = {
+            "id": mesa_id,
+            "number": str(numeromesa),
+            "name": f"Mesa {numeromesa}",
+            "status": "ocupada",
+            "contactName": customer_name,
+        }
+
+    return jsonify(
+        {
+            "ok": True,
+            "contactName": customer_name,
+            "uniplusUpdated": uniplus_updated,
+            "mesa": updated,
+        }
+    )
 
 
 @pos_bp.route("/pos/orders", methods=["POST"])

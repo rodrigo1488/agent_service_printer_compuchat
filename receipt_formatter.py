@@ -32,6 +32,11 @@ def format_order_receipt(data: dict) -> dict:
     submitted_at = data.get("submittedAt") or data.get("submitted_at") or datetime.now(timezone.utc).isoformat()
     delivery_scan_token = data.get("deliveryScanToken", "")
     delivery_scan_url = data.get("deliveryScanUrl", "")
+    try:
+        qr_module_size = int(data.get("printQrModuleSize") or 10)
+    except (TypeError, ValueError):
+        qr_module_size = 10
+    qr_module_size = min(16, max(4, qr_module_size))
 
     try:
         if isinstance(submitted_at, (int, float)):
@@ -144,4 +149,5 @@ def format_order_receipt(data: dict) -> dict:
         "custom_info": custom_info,
         "delivery_scan_token": delivery_scan_token,
         "delivery_scan_url": delivery_scan_url,
+        "qr_module_size": qr_module_size,
     }

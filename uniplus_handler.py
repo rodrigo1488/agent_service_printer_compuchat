@@ -282,6 +282,48 @@ def get_open_mesa_conta(db_module, numeromesa: int) -> Dict[str, Any]:
         conn.close()
 
 
+def update_open_mesa_cliente_name(
+    db_module,
+    numeromesa: int,
+    customer_name: str,
+    tipopedido: int = 1,
+) -> bool:
+    """Atualiza nome do cliente na conta aberta da mesa no Uniplus."""
+    customer_name = str(customer_name or "").strip()[:60]
+    if not customer_name or not is_uniplus_enabled(db_module) or psycopg2 is None:
+        return False
+    cfg = _cfg(db_module)
+    conn = _connect(cfg["connection_string"])
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            mesa_table = cfg["contamesa_table"]
+            cols = _table_columns(cur, mesa_table)
+            conta = _open_conta_by_numeromesa(
+                cur, mesa_table, int(numeromesa), int(tipopedido)
+            )
+            if not conta:
+                return False
+            sets: List[str] = []
+            params: List[Any] = []
+            if "nomecliente" in cols:
+                sets.append("nomecliente = %s")
+                params.append(customer_name)
+            if "nome" in cols:
+                sets.append("nome = %s")
+                params.append(customer_name)
+            if not sets:
+                return False
+            params.append(int(conta["id"]))
+            cur.execute(
+                f"UPDATE {mesa_table} SET {', '.join(sets)} WHERE id = %s",
+                params,
+            )
+            conn.commit()
+            return cur.rowcount > 0
+    finally:
+        conn.close()
+
+
 def _utc_naive(dt: datetime) -> datetime:
     """Normaliza para UTC sem tz, igual ao cupom (receipt_formatter)."""
     if dt.tzinfo is not None:

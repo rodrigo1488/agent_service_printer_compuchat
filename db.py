@@ -783,6 +783,21 @@ def update_pos_mesa(mesa_id: int, *, status: str, contact_name: Optional[str] = 
     return get_pos_mesa(mesa_id)
 
 
+def update_pos_mesa_contact_name(
+    mesa_id: int, contact_name: str
+) -> Optional[Dict[str, Any]]:
+    conn = _get_connection()
+    try:
+        conn.execute(
+            "UPDATE pos_mesas SET contact_name = ? WHERE id = ?",
+            (str(contact_name or "").strip(), int(mesa_id)),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return get_pos_mesa(mesa_id)
+
+
 def list_pos_products() -> List[Dict[str, Any]]:
     conn = _get_connection()
     try:
