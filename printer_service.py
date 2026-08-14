@@ -433,3 +433,147 @@ class PrinterService:
         except Exception as e:
             print(f"Erro ao imprimir na impressora local {self.printer_name_local}: {str(e)}")
             return False
+
+    @classmethod
+    def from_config(cls, cfg, timeout=4, max_retries=0):
+        cfg = cfg or {}
+        return cls(
+            printer_ip=cfg.get("printer_ip"),
+            printer_port=int(cfg.get("printer_port") or 9100),
+            printer_type=cfg.get("printer_type") or "raw",
+            paper_width=int(cfg.get("paper_width") or 32),
+            printer_encoding=cfg.get("printer_encoding") or "cp850",
+            connection_type=cfg.get("connection_type") or "network",
+            printer_name_local=cfg.get("printer_name_local") or None,
+            timeout=timeout,
+            max_retries=max_retries,
+        )
+
+    def cancel_queue(self):
+        """Cancela a fila da impressora (buffer ESC/POS e/ou spooler do Windows)."""
+        try:
+            if self.connection_type == "local":
+                return self._cancel_local_queue()
+            if self.printer_type == "ipp":
+                return self._cancel_ipp_queue()
+            return self._cancel_raw_queue()
+        except Exception as e:
+            print(f"[WARN] cancelar fila falhou: {e}")
+            return False, str(e)
+
+    def _escpos_clear_buffer_bytes(self):
+        # DLE ENQ 2: recupera erro (sem papel, tampa). DLE DC4 fn=8: limpa buffer (Epson).
+        # CAN + ESC @: cancela modo página e reinicia.
+        return (
+            bytes([0x10, 0x05, 0x02])
+            + bytes([0x10, 0x14, 0x08, 0x01, 0x03, 0x14, 0x01, 0x06, 0x02, 0x08])
+            + b"\x18\x1B\x40"
+        )
+
+    def _cancel_raw_queue(self):
+        if not self.printer_ip:
+            return False, "IP da impressora não informado"
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(min(self.timeout, 4))
+        try:
+            sock.connect((self.printer_ip, int(self.printer_port or 9100)))
+            sock.sendall(self._escpos_clear_buffer_bytes())
+        finally:
+            sock.close()
+        print(f"[INFO] Fila cancelada em {self.printer_ip}:{self.printer_port}")
+        return True, f"Fila cancelada em {self.printer_ip}:{self.printer_port}"
+
+    def _cancel_ipp_queue(self):
+        if not self.printer_ip:
+            return False, "IP da impressora não informado"
+        try:
+            conn = http.client.HTTPConnection(self.printer_ip, int(self.printer_port or 631), timeout=min(self.timeout, 4))
+            payload = self._create_ipp_purge_jobs()
+            headers = {"Content-Type": "application/ipp", "Content-Length": str(len(payload))}
+            conn.request("POST", "/ipp/print", payload, headers)
+            response = conn.getresponse()
+            conn.close()
+            if response.status not in (200, 204):
+                raise RuntimeError(f"IPP {response.status}")
+            print(f"[INFO] Fila IPP cancelada em {self.printer_ip}:{self.printer_port}")
+            return True, f"Fila cancelada via IPP em {self.printer_ip}:{self.printer_port}"
+        except Exception as ipp_exc:
+            # Muitas térmicas "IPP" ainda escutam RAW 9100 — tenta limpar o buffer ESC/POS.
+            try:
+                port = int(self.printer_port or 9100)
+                raw = PrinterService(
+                    printer_ip=self.printer_ip,
+                    printer_port=9100 if port != 9100 else port,
+                    printer_type="raw",
+                    connection_type="network",
+                    timeout=min(self.timeout, 4),
+                    max_retries=0,
+                )
+                ok, msg = raw._cancel_raw_queue()
+                if ok:
+                    return True, msg
+            except Exception:
+                pass
+            return False, str(ipp_exc)
+
+    def _create_ipp_purge_jobs(self):
+        uri = f"ipp://{self.printer_ip}/ipp/print".encode("utf-8")
+        req = b"\x02\x00"  # IPP 2.0
+        req += b"\x00\x12"  # Purge-Jobs
+        req += b"\x00\x00\x00\x01"
+        req += b"\x01"  # operation attributes
+        req += b"\x47\x00\x12attributes-charset\x00\x05utf-8"
+        req += b"\x48\x00\x1battributes-natural-language\x00\x02pt"
+        req += b"\x45\x00\x0bprinter-uri" + len(uri).to_bytes(2, "big") + uri
+        req += b"\x03"
+        return req
+
+    def _cancel_local_queue(self):
+        if not HAS_WIN32PRINT:
+            return False, "Impressora local só está disponível no Windows"
+        if not self.printer_name_local:
+            return False, "Nome da impressora local não informado"
+        handle = win32print.OpenPrinter(self.printer_name_local)
+        deleted = 0
+        try:
+            purge = getattr(win32print, "PRINTER_CONTROL_PURGE", 3)
+            try:
+                win32print.SetPrinter(handle, 0, None, purge)
+            except Exception:
+                pass
+            try:
+                jobs = win32print.EnumJobs(handle, 0, 999, 1) or []
+            except Exception:
+                jobs = []
+            for job in jobs:
+                job_id = None
+                if isinstance(job, dict):
+                    job_id = job.get("JobId")
+                elif isinstance(job, (tuple, list)) and job:
+                    job_id = job[0]
+                if not job_id:
+                    continue
+                try:
+                    win32print.SetJob(handle, job_id, 0, None, win32print.JOB_CONTROL_DELETE)
+                    deleted += 1
+                except Exception:
+                    try:
+                        win32print.SetJob(handle, job_id, 0, None, win32print.JOB_CONTROL_CANCEL)
+                        deleted += 1
+                    except Exception:
+                        pass
+            try:
+                job_info = ("Print Agent cancel queue", None, "RAW")
+                win32print.StartDocPrinter(handle, 1, job_info)
+                try:
+                    win32print.StartPagePrinter(handle)
+                    win32print.WritePrinter(handle, self._escpos_clear_buffer_bytes())
+                    win32print.EndPagePrinter(handle)
+                finally:
+                    win32print.EndDocPrinter(handle)
+            except Exception as esc_exc:
+                print(f"[WARN] ESC/POS clear na local falhou: {esc_exc}")
+        finally:
+            win32print.ClosePrinter(handle)
+        print(f"[INFO] Fila local cancelada em {self.printer_name_local} ({deleted} job(s))")
+        return True, f"Fila cancelada em {self.printer_name_local}"

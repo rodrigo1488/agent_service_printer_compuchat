@@ -183,6 +183,7 @@
                 </div>
                 <div class="printer-actions">
                     <button type="button" class="btn-test-printer btn-secondary" data-index="{{ loop.index0 }}">Testar impressora</button>
+                    <button type="button" class="btn-cancel-queue btn-ghost" data-index="{{ loop.index0 }}">Cancelar fila</button>
                     <button type="button" class="btn-remove btn-danger" aria-label="Remover impressora">Remover</button>
                 </div>
             </div>
@@ -398,6 +399,7 @@
         </div>
         <div class="printer-actions">
             <button type="button" class="btn-test-printer btn-secondary" data-index="X">Testar impressora</button>
+            <button type="button" class="btn-cancel-queue btn-ghost" data-index="X">Cancelar fila</button>
             <button type="button" class="btn-remove btn-danger" aria-label="Remover impressora">Remover</button>
         </div>
     </div>
@@ -465,7 +467,7 @@
             else if (id.indexOf('printer-name-local-') >= 0) el.setAttribute('id', 'printer-name-local-' + idx);
         });
         block.querySelectorAll('[data-index]').forEach(function(el) {
-            if (el.classList.contains('connection-type-select') || el.classList.contains('btn-refresh-printers') || el.classList.contains('btn-test-printer')) {
+            if (el.classList.contains('connection-type-select') || el.classList.contains('btn-refresh-printers') || el.classList.contains('btn-test-printer') || el.classList.contains('btn-cancel-queue')) {
                 el.setAttribute('data-index', idx);
             }
         });
@@ -481,6 +483,7 @@
         bindRemove(block);
         bindConnectionType(block);
         bindTestPrinter(block);
+        bindCancelQueue(block);
         activateTab('impressoras');
     });
 
@@ -491,37 +494,42 @@
         });
     }
 
+    function printerPayload(block, index) {
+        var prefix = 'printer_' + index + '_';
+        var connectionType = block.querySelector('[name="' + prefix + 'connection_type"]').value;
+        var payload = {
+            connection_type: connectionType,
+            paper_width: block.querySelector('[name="' + prefix + 'paper_width"]').value || '32',
+            printer_encoding: block.querySelector('[name="' + prefix + 'printer_encoding"]').value || 'cp850',
+        };
+        if (connectionType === 'local') {
+            var printerNameLocal = block.querySelector('[name="' + prefix + 'printer_name_local"]').value;
+            if (!printerNameLocal) { alert('Selecione uma impressora local primeiro'); return null; }
+            payload.printer_name_local = printerNameLocal;
+        } else {
+            var printerIp = block.querySelector('[name="' + prefix + 'printer_ip"]').value;
+            var printerPort = block.querySelector('[name="' + prefix + 'printer_port"]').value || '9100';
+            var printerType = block.querySelector('[name="' + prefix + 'printer_type"]').value || 'raw';
+            if (!printerIp) { alert('Informe o IP da impressora primeiro'); return null; }
+            payload.printer_ip = printerIp;
+            payload.printer_port = parseInt(printerPort);
+            payload.printer_type = printerType;
+        }
+        return payload;
+    }
+
     function bindTestPrinter(block) {
         var btn = block.querySelector('.btn-test-printer');
         if (!btn) return;
         btn.addEventListener('click', function() {
-            var index = btn.getAttribute('data-index');
-            var prefix = 'printer_' + index + '_';
-            var connectionType = block.querySelector('[name="' + prefix + 'connection_type"]').value;
-            var testData = {
-                connection_type: connectionType,
-                paper_width: block.querySelector('[name="' + prefix + 'paper_width"]').value || '32',
-                printer_encoding: block.querySelector('[name="' + prefix + 'printer_encoding"]').value || 'cp850',
-            };
-            if (connectionType === 'local') {
-                var printerNameLocal = block.querySelector('[name="' + prefix + 'printer_name_local"]').value;
-                if (!printerNameLocal) { alert('Selecione uma impressora local primeiro'); return; }
-                testData.printer_name_local = printerNameLocal;
-            } else {
-                var printerIp = block.querySelector('[name="' + prefix + 'printer_ip"]').value;
-                var printerPort = block.querySelector('[name="' + prefix + 'printer_port"]').value || '9100';
-                var printerType = block.querySelector('[name="' + prefix + 'printer_type"]').value || 'raw';
-                if (!printerIp) { alert('Informe o IP da impressora primeiro'); return; }
-                testData.printer_ip = printerIp;
-                testData.printer_port = parseInt(printerPort);
-                testData.printer_type = printerType;
-            }
+            var payload = printerPayload(block, btn.getAttribute('data-index'));
+            if (!payload) return;
             btn.disabled = true;
             btn.textContent = 'Testando...';
             fetch('/api/test-printer', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(testData)
+                body: JSON.stringify(payload)
             })
             .then(function(r) { return r.json(); })
             .then(function(data) {
@@ -532,6 +540,33 @@
             .finally(function() {
                 btn.disabled = false;
                 btn.textContent = 'Testar impressora';
+            });
+        });
+    }
+
+    function bindCancelQueue(block) {
+        var btn = block.querySelector('.btn-cancel-queue');
+        if (!btn) return;
+        btn.addEventListener('click', function() {
+            if (!confirm('Cancelar a fila desta impressora? Cupons ainda na memória serão descartados.')) return;
+            var payload = printerPayload(block, btn.getAttribute('data-index'));
+            if (!payload) return;
+            btn.disabled = true;
+            btn.textContent = 'Cancelando...';
+            fetch('/api/cancel-print-queue', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            })
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                if (data.success) alert('✓ ' + data.message);
+                else alert('✗ Erro: ' + (data.error || 'Falha ao cancelar a fila'));
+            })
+            .catch(function(error) { alert('✗ Erro ao conectar: ' + error.message); })
+            .finally(function() {
+                btn.disabled = false;
+                btn.textContent = 'Cancelar fila';
             });
         });
     }
@@ -613,6 +648,7 @@
     container.querySelectorAll('.printer-block').forEach(function(block) {
         bindRemove(block);
         bindTestPrinter(block);
+        bindCancelQueue(block);
         bindConnectionType(block);
     });
 })();

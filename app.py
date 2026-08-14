@@ -147,6 +147,7 @@ def _build_health_status():
             printer_health.append(
                 {
                     "device_id": p.get("device_id", ""),
+                    "name": p.get("name") or p.get("device_id") or "",
                     "connection_type": "network",
                     "printer_ip": printer_ip,
                     "printer_port": printer_port,
@@ -157,6 +158,7 @@ def _build_health_status():
             printer_health.append(
                 {
                     "device_id": p.get("device_id", ""),
+                    "name": p.get("name") or p.get("device_id") or "",
                     "connection_type": "local",
                     "accessible": True,
                 }
@@ -1095,6 +1097,36 @@ def test_printer():
                 
     except Exception as e:
         return jsonify({"error": f"Erro: {str(e)}"}), 500
+
+
+@app.route("/api/cancel-print-queue", methods=["POST"])
+def cancel_print_queue():
+    """Cancela a fila de uma impressora (form do config) ou das salvas (device_id)."""
+    try:
+        data = request.get_json(silent=True) or {}
+        device_id = str(data.get("device_id") or data.get("deviceId") or "").strip()
+        if device_id or data.get("all"):
+            from pos_api import _cancel_printer_queue, _printers_matching
+
+            targets = _printers_matching("" if data.get("all") else device_id)
+            if device_id and not targets:
+                return jsonify({"success": False, "error": "Impressora não encontrada"}), 404
+            if not targets:
+                return jsonify({"success": False, "error": "Nenhuma impressora configurada"}), 400
+            results = [_cancel_printer_queue(p) for p in targets]
+            ok = all(r.get("ok") for r in results)
+            msg = "; ".join(r.get("message") or "" for r in results)
+            return jsonify({"success": ok, "message": msg, "results": results}), (200 if ok else 500)
+
+        from printer_service import PrinterService
+
+        printer = PrinterService.from_config(data, timeout=4, max_retries=0)
+        ok, message = printer.cancel_queue()
+        if ok:
+            return jsonify({"success": True, "message": message})
+        return jsonify({"success": False, "error": message}), 500
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
 
 
 @app.route("/api/local-printers", methods=["GET"])

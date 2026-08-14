@@ -251,6 +251,34 @@ def _send_receipt(printer_cfg: Dict[str, Any], payload: Dict[str, Any], *, timeo
     return bool(printer.print_receipt(format_order_receipt(payload)))
 
 
+def _cancel_printer_queue(printer_cfg: Dict[str, Any]) -> Dict[str, Any]:
+    from printer_service import PrinterService
+
+    name = str(printer_cfg.get("name") or printer_cfg.get("device_id") or "Impressora").strip()
+    device_id = str(printer_cfg.get("device_id") or "").strip()
+    try:
+        ok, message = PrinterService.from_config(printer_cfg, timeout=4, max_retries=0).cancel_queue()
+    except Exception as exc:
+        ok, message = False, str(exc)
+    return {
+        "deviceId": device_id,
+        "name": name,
+        "ok": bool(ok),
+        "message": message or ("Fila cancelada" if ok else "Falha ao cancelar fila"),
+    }
+
+
+def _printers_matching(device_id: str = "") -> List[Dict[str, Any]]:
+    printers = list(db.get_printers() or [])
+    want = str(device_id or "").strip().lower()
+    if not want:
+        return printers
+    return [
+        p for p in printers
+        if str(p.get("device_id") or "").strip().lower() == want
+    ]
+
+
 def _print_kitchen(payload: Dict[str, Any]) -> Dict[str, Any]:
     """Tenta imprimir sem bloquear o pedido. Sempre devolve printed true/false."""
     info = {"printed": False, "attempted": 0, "failed": 0, "error": ""}
@@ -473,6 +501,20 @@ def pos_conta():
         return jsonify(get_open_mesa_conta(db, numeromesa))
     except Exception as exc:
         return jsonify({"error": str(exc), "open": False, "itens": []}), 502
+
+
+@pos_bp.route("/pos/printers/cancel-queue", methods=["POST"])
+@_require_pos_token
+def pos_cancel_print_queue():
+    body = request.get_json(silent=True) or {}
+    device_id = str(body.get("deviceId") or body.get("device_id") or "").strip()
+    targets = _printers_matching(device_id)
+    if device_id and not targets:
+        return jsonify({"ok": False, "error": "printer_not_found", "results": []}), 404
+    if not targets:
+        return jsonify({"ok": False, "error": "no_printers", "results": []}), 400
+    results = [_cancel_printer_queue(p) for p in targets]
+    return jsonify({"ok": all(r.get("ok") for r in results), "results": results})
 
 
 @pos_bp.route("/pos/pedidos", methods=["GET"])

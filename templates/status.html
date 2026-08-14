@@ -148,7 +148,7 @@
         {% for p in health.printers.health %}
         <div class="printer-row">
             <div>
-                <div class="name">{{ p.device_id or '(sem device id)' }}</div>
+                <div class="name">{{ p.name or p.device_id or '(sem device id)' }}</div>
                 <div class="meta">
                     {{ p.connection_type }}
                     {% if p.connection_type == 'network' and p.printer_ip %}
@@ -161,6 +161,7 @@
             {% else %}
             <span class="badge badge-error">Indisponível</span>
             {% endif %}
+            <button type="button" class="btn btn-ghost btn-cancel-queue" data-device-id="{{ p.device_id }}">Cancelar fila</button>
         </div>
         {% endfor %}
     </div>
@@ -170,8 +171,49 @@
 </div>
 
 <div class="actions">
+    <button type="button" class="btn btn-ghost" id="btn-cancel-all-queues">Cancelar fila de todas</button>
     <a href="/health" class="btn btn-ghost" target="_blank" rel="noopener">Ver JSON /health</a>
     <a href="/logs" class="btn btn-secondary">Abrir logs</a>
     <a href="/" class="btn">Ir para configuração</a>
 </div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+(function() {
+    function cancelQueue(payload, btn) {
+        var original = btn ? btn.textContent : '';
+        if (btn) { btn.disabled = true; btn.textContent = 'Cancelando...'; }
+        return fetch('/api/cancel-print-queue', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        })
+        .then(function(r) { return r.json().then(function(data) { return { ok: r.ok, data: data }; }); })
+        .then(function(res) {
+            if (res.data.success) alert('✓ ' + res.data.message);
+            else alert('✗ ' + (res.data.error || res.data.message || 'Falha ao cancelar a fila'));
+        })
+        .catch(function(err) { alert('✗ Erro ao conectar: ' + err.message); })
+        .finally(function() {
+            if (btn) { btn.disabled = false; btn.textContent = original; }
+        });
+    }
+    document.querySelectorAll('.btn-cancel-queue').forEach(function(btn) {
+        btn.addEventListener('click', function() {
+            var id = btn.getAttribute('data-device-id') || '';
+            if (!id) { alert('Impressora sem Device ID'); return; }
+            if (!confirm('Cancelar a fila desta impressora?')) return;
+            cancelQueue({ device_id: id }, btn);
+        });
+    });
+    var allBtn = document.getElementById('btn-cancel-all-queues');
+    if (allBtn) {
+        allBtn.addEventListener('click', function() {
+            if (!confirm('Cancelar a fila de todas as impressoras?')) return;
+            cancelQueue({ all: true }, allBtn);
+        });
+    }
+})();
+</script>
 {% endblock %}
