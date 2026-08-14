@@ -26,14 +26,36 @@ except ImportError:
 # Tamanho do módulo do QR (1-16). 10 = maior, mais fácil de escanear no celular.
 QR_MODULE_SIZE = 10
 
-# ESC/POS GS ! — escala de fonte no cupom (1=normal, 2=altura dupla, 3=largura+altura duplas)
-def _escpos_font_scale_command(scale: int) -> bytes:
+# ESC/POS — escala de fonte (1=normal, 2=altura dupla, 3=largura+altura duplas).
+# Usa ESC ! e GS ! juntos — clones chineses costumam obedecer melhor ao ESC !.
+def _escpos_select_scale(scale: int) -> bytes:
     s = min(3, max(1, int(scale or 1)))
     if s == 1:
-        return b"\x1D\x21\x00"
+        return b"\x1B\x21\x00\x1D\x21\x00"
     if s == 2:
-        return b"\x1D\x21\x10"
-    return b"\x1D\x21\x11"
+        return b"\x1B\x21\x10\x1D\x21\x10"
+    return b"\x1B\x21\x30\x1D\x21\x11"
+
+
+def _escpos_reset_scale() -> bytes:
+    return b"\x1B\x21\x00\x1D\x21\x00"
+
+
+def _escpos_font_scale_command(scale: int) -> bytes:
+    return _escpos_select_scale(scale)
+
+
+def _resolve_font_scale(receipt_data) -> int:
+    if not isinstance(receipt_data, dict):
+        return 1
+    for key in ("font_scale", "printFontScale", "print_font_scale"):
+        try:
+            val = int(receipt_data.get(key) or 0)
+            if 1 <= val <= 3:
+                return val
+        except (TypeError, ValueError):
+            continue
+    return 1
 
 
 def _layout_width_for_font_scale(paper_width: int, scale: int) -> int:
@@ -51,14 +73,39 @@ def _escpos_pickup_banner(encoding: str = "cp850") -> bytes:
         label = "RETIRADA".encode("cp850", errors="replace")
     cmd = b"\x1B\x61\x01"  # centralizar
     cmd += b"\x1B\x45\x01"  # negrito
-    cmd += _escpos_font_scale_command(3)
-    cmd += b"\n\n"
+    cmd += _escpos_select_scale(3)
+    cmd += b"\n\n\n"
     cmd += label + b"\n"
-    cmd += label + b"\n\n\n"
-    cmd += _escpos_font_scale_command(1)
+    cmd += label + b"\n\n"
+    cmd += _escpos_reset_scale()
     cmd += b"\x1B\x45\x00"
     cmd += b"\x1B\x61\x00"
+    cmd += b"\n\n\n\n\n"
     return cmd
+
+
+def _answer_indicates_pickup(answer: dict) -> bool:
+    if not isinstance(answer, dict):
+        return False
+    label = str(answer.get("label", "")).lower()
+    if not (
+        ("tipo" in label and ("pedido" in label or "entrega" in label))
+        or "modalidade" in label
+        or "retirada" in label
+        or ("entrega" in label and "tipo" in label)
+    ):
+        return False
+    val = str(answer.get("answer", "")).lower()
+    if not val:
+        return False
+    if any(token in val for token in ("entrega", "delivery", "entregar")):
+        if any(token in val for token in ("retirada", "balcão", "balcao", "local", "pickup", "buscar", "pegar")):
+            return "retirada" in val or "balc" in val or "local" in val or "pickup" in val or "buscar" in val or "pegar" in val
+        return False
+    return any(
+        token in val
+        for token in ("retirada", "balcão", "balcao", "local", "pickup", "buscar", "pegar", "levar")
+    )
 
 
 def _resolve_is_pickup(receipt_data) -> bool:
@@ -86,17 +133,9 @@ def _resolve_is_pickup(receipt_data) -> bool:
     if receipt_data.get("pickup") is True or receipt_data.get("retirada") is True:
         return True
 
-    for answer in receipt_data.get("answers") or []:
-        if not isinstance(answer, dict):
-            continue
-        label = str(answer.get("label", "")).lower()
-        if "tipo" in label and ("pedido" in label or "entrega" in label):
-            val = str(answer.get("answer", "")).lower()
-            if any(
-                token in val
-                for token in ("retirada", "balcão", "balcao", "local", "pickup", "buscar", "pegar")
-            ):
-                return True
+    for answer in receipt_data.get("allAnswers") or receipt_data.get("answers") or []:
+        if _answer_indicates_pickup(answer):
+            return True
     return False
 
 _active_lock = threading.Lock()
@@ -284,7 +323,7 @@ class PrinterService:
             print(f"[WARN] Timeout aguardando fila da impressora {key}")
             return False
         try:
-            scale = min(3, max(1, int(receipt_data.get("font_scale") or 1)))
+            scale = _resolve_font_scale(receipt_data)
             is_pickup = _resolve_is_pickup(receipt_data)
             receipt_for_text = dict(receipt_data)
             receipt_for_text["is_pickup"] = is_pickup
@@ -319,7 +358,7 @@ class PrinterService:
     
     def _generate_receipt_text(self, receipt):
         """Gera o texto formatado do recibo"""
-        scale = min(3, max(1, int(receipt.get("font_scale") or 1)))
+        scale = _resolve_font_scale(receipt)
         W = _layout_width_for_font_scale(self.paper_width, scale)
         lines = []
 
@@ -456,24 +495,52 @@ class PrinterService:
             lines.append("")
 
         if receipt.get("is_pickup"):
-            lines.append("")
-            lines.append("=" * W)
-            label = "RETIRADA"
-            pad = max(0, (W - len(label)) // 2)
-            centered = (" " * pad + label)[:W]
-            lines.append(centered)
-            lines.append(centered)
-            lines.append("=" * W)
+            lines.append("-" * W)
             lines.append("")
 
         lines.append("=" * W)
         lines.append("")
         lines.append("Obrigado pela preferência!")
         lines.append("")
+
+        if receipt.get("is_pickup"):
+            lines.append("")
+            lines.append("*" * W)
+            label = "RETIRADA"
+            pad = max(0, (W - len(label)) // 2)
+            centered = (" " * pad + label)[:W]
+            lines.append(centered)
+            lines.append(centered)
+            lines.append(centered)
+            lines.append("*" * W)
+            lines.append("")
+
         lines.append("")
-        lines.append("")  # Espaços para cortar papel
+        lines.append("")
+        lines.append("")
+        lines.append("")
+        lines.append("")
         
         return "\n".join(lines)
+    
+    def _compose_escpos_payload(self, text, qr_bytes=b"", pickup_bytes=b"", font_scale=1) -> bytes:
+        """Monta buffer ESC/POS completo: init, tabela, escala, texto, QR, rodapé, avanço, corte."""
+        esc_encoding, _encoding = self._get_esc_pos_encoding()
+        text_bytes = self._encode_text_with_fallback(text)
+        esc_pos_init = b"\x1B\x40"
+        esc_pos_cut = b"\x1D\x56\x00"
+        feed = b"\n" * 8
+        return (
+            esc_pos_init
+            + esc_encoding
+            + _escpos_select_scale(font_scale)
+            + text_bytes
+            + _escpos_reset_scale()
+            + qr_bytes
+            + pickup_bytes
+            + feed
+            + esc_pos_cut
+        )
     
     def _get_esc_pos_encoding(self):
         """Retorna (bytes_cmd, encoding) para caracteres portugueses (ç, ã, é)"""
@@ -508,8 +575,7 @@ class PrinterService:
     def _print_via_raw(self, text, qr_bytes=b"", pickup_bytes=b"", font_scale=1):
         """Imprime via socket RAW (porta 9100). qr_bytes: opcional, QR ESC/POS."""
         epoch = _generation(self._printer_key())
-        font_cmd = _escpos_font_scale_command(font_scale)
-        font_reset = b"\x1D\x21\x00"
+        _ = _escpos_select_scale(font_scale)
 
         @retry_with_backoff(RetryConfig(
             max_retries=self.max_retries,
@@ -520,20 +586,8 @@ class PrinterService:
         def _send_to_printer():
             if _generation(self._printer_key()) != epoch:
                 raise _QueueCancelled()
-            esc_encoding, encoding = self._get_esc_pos_encoding()
-            # Usar fallback de encoding
-            text_bytes = self._encode_text_with_fallback(text)
-            esc_pos_reset = b"\x1B\x40"
-            esc_pos_cut = b"\x1D\x56\x00"
-            full_command = (
-                esc_pos_reset
-                + font_cmd
-                + esc_encoding
-                + text_bytes
-                + qr_bytes
-                + font_reset
-                + pickup_bytes
-                + esc_pos_cut
+            full_command = self._compose_escpos_payload(
+                text, qr_bytes=qr_bytes, pickup_bytes=pickup_bytes, font_scale=font_scale
             )
             
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -574,15 +628,15 @@ class PrinterService:
             return False
     
     def _print_via_ipp(self, text, qr_bytes=b"", pickup_bytes=b"", font_scale=1):
-        """Imprime via IPP. qr_bytes: opcional. font_scale ignorado (IPP não aplica GS !)."""
-        _ = font_scale
+        """Imprime via IPP com comandos ESC/POS no payload."""
         try:
-            _, encoding = self._get_esc_pos_encoding()
-            text_bytes = text.encode(encoding, errors="replace")
-            font_reset = b"\x1D\x21\x00"
+            ipp_payload = self._create_ipp_request(
+                self._compose_escpos_payload(
+                    text, qr_bytes=qr_bytes, pickup_bytes=pickup_bytes, font_scale=font_scale
+                )
+            )
             conn = http.client.HTTPConnection(self.printer_ip, self.printer_port, timeout=5)
             headers = {"Content-Type": "application/ipp"}
-            ipp_payload = self._create_ipp_request(text_bytes + qr_bytes + font_reset + pickup_bytes)
             headers["Content-Length"] = str(len(ipp_payload))
             conn.request("POST", "/ipp/print", ipp_payload, headers)
             response = conn.getresponse()
@@ -642,25 +696,8 @@ class PrinterService:
             retryable_exceptions=(Exception,)
         ))
         def _send_to_local_printer():
-            # Usar fallback de encoding
-            text_bytes = self._encode_text_with_fallback(text)
-            
-            # Comando ESC/POS para cortar papel: GS V 0 (corte total)
-            # 0x1D = GS (Group Separator)
-            # 0x56 = V (comando de corte)
-            # 0x00 = modo de corte (0 = corte total)
-            esc_pos_cut = b"\x1D\x56\x00"
-            esc_pos_init = b"\x1B\x40"
-            font_cmd = _escpos_font_scale_command(font_scale)
-            font_reset = b"\x1D\x21\x00"
-            full_content = (
-                esc_pos_init
-                + font_cmd
-                + text_bytes
-                + qr_bytes
-                + font_reset
-                + pickup_bytes
-                + esc_pos_cut
+            full_content = self._compose_escpos_payload(
+                text, qr_bytes=qr_bytes, pickup_bytes=pickup_bytes, font_scale=font_scale
             )
             
             # Abrir a impressora local

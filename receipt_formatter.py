@@ -29,6 +29,7 @@ def format_order_receipt(data: dict) -> dict:
     responder = data.get("responder", {})
     menu_items = data.get("menuItems", [])
     answers = data.get("answers", [])
+    all_answers = data.get("allAnswers") or answers
     submitted_at = data.get("submittedAt") or data.get("submitted_at") or datetime.now(timezone.utc).isoformat()
     delivery_scan_token = data.get("deliveryScanToken", "")
     delivery_scan_url = data.get("deliveryScanUrl", "")
@@ -38,7 +39,12 @@ def format_order_receipt(data: dict) -> dict:
         qr_module_size = 10
     qr_module_size = min(16, max(4, qr_module_size))
     try:
-        font_scale = int(data.get("printFontScale") or 1)
+        font_scale = int(
+            data.get("printFontScale")
+            or data.get("font_scale")
+            or (isinstance(data.get("metadata"), dict) and data.get("metadata", {}).get("printFontScale"))
+            or 1
+        )
     except (TypeError, ValueError):
         font_scale = 1
     font_scale = min(3, max(1, font_scale))
@@ -56,16 +62,23 @@ def format_order_receipt(data: dict) -> dict:
         or str(data.get("retirada") or "").lower() in ("1", "true", "sim")
     )
     if not is_pickup:
-        for answer in answers:
+        for answer in all_answers:
             label = str(answer.get("label", "")).lower()
-            if "tipo" in label and ("pedido" in label or "entrega" in label):
-                val = str(answer.get("answer", "")).lower()
-                if any(
-                    token in val
-                    for token in ("retirada", "balcão", "balcao", "local", "pickup", "buscar")
-                ):
-                    is_pickup = True
-                    break
+            if not (
+                ("tipo" in label and ("pedido" in label or "entrega" in label))
+                or "modalidade" in label
+            ):
+                continue
+            val = str(answer.get("answer", "")).lower()
+            if any(
+                token in val
+                for token in ("retirada", "balcão", "balcao", "local", "pickup", "buscar", "pegar", "levar")
+            ) and not any(token in val for token in ("entrega", "delivery")):
+                is_pickup = True
+                break
+            if "retirada" in val or "balc" in val or "local" in val:
+                is_pickup = True
+                break
     if is_pickup:
         delivery_scan_token = ""
         delivery_scan_url = ""
@@ -183,6 +196,7 @@ def format_order_receipt(data: dict) -> dict:
         "delivery_scan_url": delivery_scan_url,
         "qr_module_size": qr_module_size,
         "font_scale": font_scale,
+        "printFontScale": font_scale,
         "is_pickup": is_pickup,
         "fulfillment_mode": fulfillment_mode or ("pickup" if is_pickup else ""),
     }

@@ -395,6 +395,21 @@ def _handle_print_job(ws, job_id: int, conteudo: dict, printer_config: dict):
 
     try:
         receipt = format_order_receipt(conteudo)
+        for key in (
+            "printFontScale",
+            "fulfillmentMode",
+            "pickup",
+            "retirada",
+            "allAnswers",
+            "metadata",
+        ):
+            if key in (conteudo or {}) and (conteudo or {}).get(key) is not None:
+                receipt[key] = (conteudo or {}).get(key)
+        if receipt.get("printFontScale") and not receipt.get("font_scale"):
+            try:
+                receipt["font_scale"] = int(receipt.get("printFontScale") or 1)
+            except (TypeError, ValueError):
+                pass
 
         # Retry automÃ¡tico para impressÃ£o com backoff exponencial
         @retry_with_backoff(RetryConfig(
