@@ -733,6 +733,10 @@ def _run_websocket(printer_config: dict):
         _agent_threads_by_device.pop(base_device_id, None)
     if _should_stop or not _is_printer_configured(base_device_id):
         thread_monitor.unregister_thread(f"websocket_{base_device_id}")
+    _refresh_thread_list()
+
+
+def _refresh_thread_list():
     global _agent_threads
     _agent_threads = [
         t for t in _agent_threads_by_device.values()

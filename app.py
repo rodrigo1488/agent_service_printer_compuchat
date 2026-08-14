@@ -1154,8 +1154,26 @@ def get_local_printers():
 
 
 def run_flask():
-    """Executa o servidor Flask."""
-    app.run(host="0.0.0.0", port=5000, debug=False, use_reloader=False, threaded=True)
+    """Executa o servidor HTTP de produção (Waitress)."""
+    host = os.environ.get("PRINT_AGENT_HOST", "0.0.0.0")
+    port = int(os.environ.get("PRINT_AGENT_PORT", "5000") or 5000)
+    threads = int(os.environ.get("PRINT_AGENT_THREADS", "8") or 8)
+    try:
+        from waitress import serve
+    except ImportError:
+        print("[WARN] waitress não instalado; usando Flask de desenvolvimento. pip install waitress")
+        app.run(host=host, port=port, debug=False, use_reloader=False, threaded=True)
+        return
+    print(f"[INFO] Waitress escutando em http://{host}:{port} ({threads} threads)")
+    serve(
+        app,
+        host=host,
+        port=port,
+        threads=max(4, threads),
+        channel_timeout=120,
+        ident="PrintAgent",
+        clear_untrusted_proxy_headers=True,
+    )
 
 
 if __name__ == "__main__":
