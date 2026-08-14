@@ -53,11 +53,51 @@ def _escpos_pickup_banner(encoding: str = "cp850") -> bytes:
     cmd += b"\x1B\x45\x01"  # negrito
     cmd += _escpos_font_scale_command(3)
     cmd += b"\n\n"
-    cmd += label + b"\n\n"
+    cmd += label + b"\n"
+    cmd += label + b"\n\n\n"
     cmd += _escpos_font_scale_command(1)
     cmd += b"\x1B\x45\x00"
     cmd += b"\x1B\x61\x00"
     return cmd
+
+
+def _resolve_is_pickup(receipt_data) -> bool:
+    """Detecta pedido de retirada a partir de várias chaves do payload."""
+    if not isinstance(receipt_data, dict):
+        return False
+    if receipt_data.get("is_pickup") is True:
+        return True
+
+    mode = str(
+        receipt_data.get("fulfillment_mode")
+        or receipt_data.get("fulfillmentMode")
+        or ""
+    ).strip().lower()
+    if mode == "pickup":
+        return True
+
+    meta = receipt_data.get("metadata")
+    if isinstance(meta, dict):
+        if str(meta.get("fulfillmentMode") or "").strip().lower() == "pickup":
+            return True
+        if meta.get("pickup") is True or meta.get("retirada") is True:
+            return True
+
+    if receipt_data.get("pickup") is True or receipt_data.get("retirada") is True:
+        return True
+
+    for answer in receipt_data.get("answers") or []:
+        if not isinstance(answer, dict):
+            continue
+        label = str(answer.get("label", "")).lower()
+        if "tipo" in label and ("pedido" in label or "entrega" in label):
+            val = str(answer.get("answer", "")).lower()
+            if any(
+                token in val
+                for token in ("retirada", "balcão", "balcao", "local", "pickup", "buscar", "pegar")
+            ):
+                return True
+    return False
 
 _active_lock = threading.Lock()
 _active_socks = []  # (key, socket)
@@ -245,8 +285,10 @@ class PrinterService:
             return False
         try:
             scale = min(3, max(1, int(receipt_data.get("font_scale") or 1)))
-            is_pickup = bool(receipt_data.get("is_pickup"))
-            receipt_text = self._generate_receipt_text(receipt_data)
+            is_pickup = _resolve_is_pickup(receipt_data)
+            receipt_for_text = dict(receipt_data)
+            receipt_for_text["is_pickup"] = is_pickup
+            receipt_text = self._generate_receipt_text(receipt_for_text)
             qr_bytes = b""
             if not is_pickup and receipt_data.get("delivery_scan_url"):
                 qr_bytes = _escpos_qr_bytes(
@@ -413,6 +455,17 @@ class PrinterService:
             lines.append("-" * W)
             lines.append("")
 
+        if receipt.get("is_pickup"):
+            lines.append("")
+            lines.append("=" * W)
+            label = "RETIRADA"
+            pad = max(0, (W - len(label)) // 2)
+            centered = (" " * pad + label)[:W]
+            lines.append(centered)
+            lines.append(centered)
+            lines.append("=" * W)
+            lines.append("")
+
         lines.append("=" * W)
         lines.append("")
         lines.append("Obrigado pela preferência!")
@@ -477,9 +530,9 @@ class PrinterService:
                 + font_cmd
                 + esc_encoding
                 + text_bytes
-                + pickup_bytes
                 + qr_bytes
                 + font_reset
+                + pickup_bytes
                 + esc_pos_cut
             )
             
@@ -526,9 +579,10 @@ class PrinterService:
         try:
             _, encoding = self._get_esc_pos_encoding()
             text_bytes = text.encode(encoding, errors="replace")
+            font_reset = b"\x1D\x21\x00"
             conn = http.client.HTTPConnection(self.printer_ip, self.printer_port, timeout=5)
             headers = {"Content-Type": "application/ipp"}
-            ipp_payload = self._create_ipp_request(text_bytes + pickup_bytes + qr_bytes)
+            ipp_payload = self._create_ipp_request(text_bytes + qr_bytes + font_reset + pickup_bytes)
             headers["Content-Length"] = str(len(ipp_payload))
             conn.request("POST", "/ipp/print", ipp_payload, headers)
             response = conn.getresponse()
@@ -600,7 +654,13 @@ class PrinterService:
             font_cmd = _escpos_font_scale_command(font_scale)
             font_reset = b"\x1D\x21\x00"
             full_content = (
-                esc_pos_init + font_cmd + text_bytes + pickup_bytes + qr_bytes + font_reset + esc_pos_cut
+                esc_pos_init
+                + font_cmd
+                + text_bytes
+                + qr_bytes
+                + font_reset
+                + pickup_bytes
+                + esc_pos_cut
             )
             
             # Abrir a impressora local

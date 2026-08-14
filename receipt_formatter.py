@@ -52,6 +52,8 @@ def format_order_receipt(data: dict) -> dict:
         fulfillment_mode == "pickup"
         or data.get("pickup") is True
         or data.get("retirada") is True
+        or str(data.get("pickup") or "").lower() in ("1", "true", "sim")
+        or str(data.get("retirada") or "").lower() in ("1", "true", "sim")
     )
     if not is_pickup:
         for answer in answers:
