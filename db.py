@@ -421,7 +421,7 @@ def get_printers() -> List[Dict[str, Any]]:
     if raw and raw.strip():
         try:
             data = json.loads(raw)
-            if isinstance(data, list) and len(data) > 0:
+            if isinstance(data, list):
                 return [
                     {
                         "device_id": p.get("device_id", ""),
@@ -436,6 +436,7 @@ def get_printers() -> List[Dict[str, Any]]:
                         "printer_name_local": p.get("printer_name_local") or "",
                     }
                     for p in data
+                    if isinstance(p, dict)
                 ]
         except (json.JSONDecodeError, TypeError):
             pass

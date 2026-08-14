@@ -39,6 +39,7 @@ logging.basicConfig(
 logger = logging.getLogger("agent")
 
 _agent_threads = []
+_agent_threads_by_device = {}
 _should_stop = False
 _active_websockets = {}
 _active_websockets_lock = threading.Lock()
@@ -222,15 +223,25 @@ def mark_print_queue_done(device_id: str = "", printer_cfg: dict = None) -> dict
     }
 
 
-def _get_latest_printer_config(device_id: str, fallback_config: dict) -> dict:
-    """Busca configuraÃ§Ã£o mais recente da impressora no banco, com fallback para config inicial."""
-    if not device_id:
-        return fallback_config
-
+def _is_printer_configured(device_id: str) -> bool:
+    want = (device_id or "").strip()
+    if not want:
+        return False
     for printer in db.get_printers():
-        if (printer.get("device_id") or "").strip() == device_id:
+        if (printer.get("device_id") or "").strip() == want:
+            return True
+    return False
+
+
+def _get_latest_printer_config(device_id: str, fallback_config: dict = None) -> dict:
+    """Config atual da impressora no banco. None se ela foi removida."""
+    want = (device_id or "").strip()
+    if not want:
+        return fallback_config
+    for printer in db.get_printers():
+        if (printer.get("device_id") or "").strip() == want:
             return printer
-    return fallback_config
+    return None
 
 
 def _send_uniplus_ack(ws, payload: dict):
@@ -311,7 +322,7 @@ def _handle_uniplus_job(ws, job_id: int, conteudo: dict):
 def _handle_print_job(ws, job_id: int, conteudo: dict, printer_config: dict):
     """Processa um job de impressão usando a impressora indicada em printer_config."""
     initial_device_id = (printer_config.get("device_id") or "").strip()
-    latest_config = _get_latest_printer_config(initial_device_id, printer_config)
+    latest_config = _get_latest_printer_config(initial_device_id) or printer_config
 
     device_id = latest_config.get("device_id", "unknown")
     printer_ip = latest_config.get("printer_ip", "192.168.1.100")
@@ -362,7 +373,7 @@ def _handle_print_job(ws, job_id: int, conteudo: dict, printer_config: dict):
                 f"Job {job_id}: impressora indisponÃ­vel ({printer_ip}:{printer_port}), aguardando retorno..."
             )
             time.sleep(PRINTER_RECOVERY_CHECK_INTERVAL)
-            latest_config = _get_latest_printer_config(device_id, latest_config)
+            latest_config = _get_latest_printer_config(device_id) or latest_config
             printer_ip = latest_config.get("printer_ip", printer_ip)
             printer_port = int(latest_config.get("printer_port") or printer_port)
 
@@ -577,7 +588,14 @@ def _run_websocket(printer_config: dict):
     logged_credentials_once = False
 
     while not _should_stop:
-        latest_config = _get_latest_printer_config(base_device_id, printer_config)
+        if not _is_printer_configured(base_device_id):
+            _log("INFO", f"Impressora removida da configuração (device_id={base_device_id}). Encerrando conexão.")
+            _close_websocket(base_device_id)
+            break
+        latest_config = _get_latest_printer_config(base_device_id)
+        if not latest_config:
+            _log("INFO", f"Impressora removida da configuração (device_id={base_device_id}). Encerrando conexão.")
+            break
         ws_url = db.get_config("ws_url")
         token = (latest_config.get("token") or "").strip()
         device_id = (latest_config.get("device_id") or "").strip() or base_device_id
@@ -672,6 +690,9 @@ def _run_websocket(printer_config: dict):
 
         if _should_stop:
             break
+        if not _is_printer_configured(base_device_id):
+            _log("INFO", f"Impressora removida da configuração (device_id={base_device_id}). Encerrando conexão.")
+            break
 
         if session_opened:
             # Sessão chegou a abrir: reset do backoff deste device.
@@ -707,75 +728,103 @@ def _run_websocket(printer_config: dict):
 
         _interruptible_sleep(wait_s)
 
+    _log("INFO", f"Thread WebSocket encerrada (device_id={base_device_id})")
+    if _agent_threads_by_device.get(base_device_id) is threading.current_thread():
+        _agent_threads_by_device.pop(base_device_id, None)
+    if _should_stop or not _is_printer_configured(base_device_id):
+        thread_monitor.unregister_thread(f"websocket_{base_device_id}")
+    global _agent_threads
+    _agent_threads = [
+        t for t in _agent_threads_by_device.values()
+        if t is not None and t.is_alive()
+    ]
+
 
 def start_agent_thread():
-    """Inicia uma thread por impressora configurada (cada uma conecta ao SaaS com seu device_id/token)."""
-    global _agent_threads, _should_stop
+    """Sincroniza uma thread WebSocket por impressora configurada (cria novas, para removidas)."""
+    global _should_stop
 
     _should_stop = False
-    alive_threads = [t for t in _agent_threads if t.is_alive()]
-    if alive_threads:
-        _agent_threads = alive_threads
-        _log("INFO", "Agent jÃ¡ estÃ¡ em execuÃ§Ã£o.")
-        return
-    _agent_threads = []
 
-    printers = db.get_printers()
-    if not printers:
-        _log("WARN", "Nenhuma impressora configurada. Adicione em http://localhost:5000/")
-        return
+    printers = [
+        p for p in (db.get_printers() or [])
+        if (p.get("device_id") or "").strip() and (p.get("token") or "").strip()
+    ]
+    wanted = {(p.get("device_id") or "").strip(): p for p in printers}
 
-    ws_url = db.get_config("ws_url")
-    if not ws_url or not ws_url.strip():
-        _log("WARN", "Configure a URL WebSocket (Conexão SaaS) em http://localhost:5000/")
-        return
-
-    # Iniciar monitor de threads se ainda não estiver rodando
     if not thread_monitor.monitor_thread or not thread_monitor.monitor_thread.is_alive():
         thread_monitor.start()
 
-    for p in printers:
-        if not p.get("device_id") or not p.get("token"):
+    for did in list(_agent_threads_by_device.keys()):
+        if did in wanted:
             continue
-        
-        device_id = p.get("device_id")
-        
-        def create_thread_for_printer(printer_config):
-            """Cria uma nova thread para a impressora."""
-            t = threading.Thread(target=_run_websocket, args=(printer_config,), daemon=True)
-            t.start()
-            return t
-        
-        t = create_thread_for_printer(p)
-        _agent_threads.append(t)
-        
-        # Registrar thread no monitor para auto-restart
-        def restart_callback(printer_snapshot=p):
-            return create_thread_for_printer(printer_snapshot)
-        
+        _log("INFO", f"Parando conexão da impressora removida (device_id={did})")
+        thread_monitor.unregister_thread(f"websocket_{did}")
+        _close_websocket(did)
+        _agent_threads_by_device.pop(did, None)
+
+    ws_url = (db.get_config("ws_url") or "").strip()
+    if not wanted:
+        _log("WARN", "Nenhuma impressora configurada. Adicione em http://localhost:5000/")
+        _refresh_thread_list()
+        return
+    if not ws_url:
+        _log("WARN", "Configure a URL WebSocket (Conexão SaaS) em http://localhost:5000/")
+        _refresh_thread_list()
+        return
+
+    for did, printer_cfg in wanted.items():
+        existing = _agent_threads_by_device.get(did)
+        if existing is not None and existing.is_alive():
+            continue
+
+        t = threading.Thread(
+            target=_run_websocket,
+            args=(printer_cfg,),
+            daemon=True,
+            name=f"ws_{did}",
+        )
+        t.start()
+        _agent_threads_by_device[did] = t
+
+        def restart_callback(snapshot=printer_cfg, device_id=did):
+            if _should_stop or not _is_printer_configured(device_id):
+                _agent_threads_by_device.pop(device_id, None)
+                return None
+            new_thread = threading.Thread(
+                target=_run_websocket,
+                args=(snapshot,),
+                daemon=True,
+                name=f"ws_{device_id}",
+            )
+            new_thread.start()
+            _agent_threads_by_device[device_id] = new_thread
+            _refresh_thread_list()
+            return new_thread
+
         thread_monitor.register_thread(
-            f"websocket_{device_id}",
+            f"websocket_{did}",
             t,
             restart_callback,
             max_restarts=5,
-            restart_delay=5.0
+            restart_delay=5.0,
         )
-        
-        _log("INFO", f"Thread iniciada para device_id={device_id} (monitorada)")
+        _log("INFO", f"Thread iniciada para device_id={did} (monitorada)")
+
+    _refresh_thread_list()
 
 
 def stop_agent():
-    """Sinaliza o agent para parar (na prÃ³xima desconexÃ£o)."""
+    """Sinaliza o agent para parar e encerra as conexões WebSocket."""
     global _should_stop, _agent_threads
     _should_stop = True
+    thread_monitor.stop()
     _close_all_websockets()
 
-    # Aguardar encerramento das threads de websocket para permitir restart limpo.
-    for t in _agent_threads:
+    for t in list(_agent_threads_by_device.values()):
         try:
             t.join(timeout=3.0)
         except Exception:
             pass
-    _agent_threads = [t for t in _agent_threads if t.is_alive()]
-
-    thread_monitor.stop()
+    _agent_threads_by_device.clear()
+    _agent_threads = []

@@ -312,13 +312,13 @@ def config():
             print(f"[DEBUG] Impressoras salvas com sucesso")
             if restart_on_save:
                 stop_agent()
-                start_agent_thread()
-                print("[INFO] Serviço reiniciado após salvar configuração.")
+            start_agent_thread()
+            print("[INFO] Conexões WebSocket sincronizadas com as impressoras salvas.")
             return redirect(
                 url_for(
                     "index",
                     message="Configuração salva com sucesso!"
-                    + (" Serviço reiniciado." if restart_on_save else ""),
+                    + (" Serviço reiniciado." if restart_on_save else " Conexões atualizadas."),
                     message_type="success",
                 )
                 + "#conexao"

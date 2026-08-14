@@ -168,6 +168,10 @@ class ThreadMonitor:
                     try:
                         # Criar nova thread usando o callback
                         new_thread = info["restart_callback"]()
+                        if new_thread is None:
+                            self.monitored_threads.pop(thread_id, None)
+                            logger.info(f"Thread {thread_id} não reiniciada (impressora removida)")
+                            continue
                         info["thread"] = new_thread
                         info["restart_count"] += 1
                         info["last_restart"] = datetime.now()
@@ -189,6 +193,8 @@ class ThreadMonitor:
         self._should_stop = True
         if self.monitor_thread:
             self.monitor_thread.join(timeout=5.0)
+        with self._lock:
+            self.monitored_threads.clear()
         logger.info("ThreadMonitor parado")
 
 
