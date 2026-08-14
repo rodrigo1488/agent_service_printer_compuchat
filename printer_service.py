@@ -89,6 +89,17 @@ def _close_active_socks(key):
 
 
 _drain_until = {}
+_print_sem_lock = threading.Lock()
+_print_sems = {}
+
+
+def _printer_semaphore(key):
+    with _print_sem_lock:
+        sem = _print_sems.get(key)
+        if sem is None:
+            sem = threading.Semaphore(1)
+            _print_sems[key] = sem
+        return sem
 
 
 def _is_draining_key(key) -> bool:
@@ -194,6 +205,11 @@ class PrinterService:
         if _is_draining_key(self._printer_key()):
             print("[INFO] Fila marcada como impressa — não envia cupom")
             return True
+        key = self._printer_key()
+        sem = _printer_semaphore(key)
+        if not sem.acquire(timeout=45):
+            print(f"[WARN] Timeout aguardando fila da impressora {key}")
+            return False
         try:
             receipt_text = self._generate_receipt_text(receipt_data)
             qr_bytes = b""
@@ -205,13 +221,14 @@ class PrinterService:
 
             if self.connection_type == "local":
                 return self._print_via_local(receipt_text, qr_bytes=qr_bytes)
-            elif self.printer_type == "ipp":
+            if self.printer_type == "ipp":
                 return self._print_via_ipp(receipt_text, qr_bytes=qr_bytes)
-            else:
-                return self._print_via_raw(receipt_text, qr_bytes=qr_bytes)
+            return self._print_via_raw(receipt_text, qr_bytes=qr_bytes)
         except Exception as e:
             print(f"Erro ao imprimir: {str(e)}")
             return False
+        finally:
+            sem.release()
     
     def _generate_receipt_text(self, receipt):
         """Gera o texto formatado do recibo"""

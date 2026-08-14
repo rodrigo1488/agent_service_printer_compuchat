@@ -1177,7 +1177,7 @@ def run_flask():
     """Executa o servidor HTTP de produção (Waitress)."""
     host = os.environ.get("PRINT_AGENT_HOST", "0.0.0.0")
     port = int(os.environ.get("PRINT_AGENT_PORT", "5000") or 5000)
-    threads = int(os.environ.get("PRINT_AGENT_THREADS", "8") or 8)
+    threads = int(os.environ.get("PRINT_AGENT_THREADS", "16") or 16)
     try:
         from waitress import serve
     except ImportError:
@@ -1189,7 +1189,7 @@ def run_flask():
         app,
         host=host,
         port=port,
-        threads=max(8, threads),
+        threads=max(12, threads),
         channel_timeout=120,
         connection_limit=200,
         backlog=64,

@@ -11,6 +11,7 @@ from flask import Blueprint, jsonify, request, send_file
 
 import db
 from pos_catalog import media_dir, sync_catalog_from_cloud
+from pos_print_worker import schedule_kitchen_print
 from uniplus_handler import (
     get_open_mesa_conta,
     handle_uniplus_job,
@@ -659,11 +660,12 @@ def pos_orders():
         if existing.get("pending"):
             return jsonify({"error": "order_in_progress", "clientOrderId": client_order_id}), 409
         if existing.get("ok") and not existing.get("printed"):
-            print_payload = _order_print_payload(body, existing)
-            print_info = _print_kitchen(print_payload)
-            existing["printed"] = bool(print_info.get("printed"))
-            existing["printError"] = print_info.get("error") or ""
-            db.save_pos_order(client_order_id, existing)
+            schedule_kitchen_print(
+                client_order_id,
+                _order_print_payload(body, existing),
+                _print_kitchen,
+            )
+            existing["printError"] = existing.get("printError") or "Impressão em andamento"
         return jsonify({"ok": True, "reused": True, **existing})
 
     menu_items = body.get("menuItems") or []
@@ -758,10 +760,8 @@ def pos_orders():
         },
     }
     db.save_pos_order(client_order_id, result)
-    print_info = _print_kitchen(print_payload)
-    result["printed"] = bool(print_info.get("printed"))
-    result["printError"] = print_info.get("error") or ""
-    db.save_pos_order(client_order_id, result)
+    schedule_kitchen_print(client_order_id, print_payload, _print_kitchen)
+    result["printError"] = "Impressão em andamento"
     return jsonify(result)
 
 
