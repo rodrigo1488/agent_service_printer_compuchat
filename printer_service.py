@@ -66,21 +66,26 @@ def _layout_width_for_font_scale(paper_width: int, scale: int) -> int:
 
 
 def _escpos_pickup_banner(encoding: str = "cp850") -> bytes:
-    """Banner grande e centralizado para pedidos de retirada no balcão."""
+    """Banner grande e centralizado — sempre no fim, independente da escala do cupom."""
     try:
         label = "RETIRADA".encode(encoding, errors="replace")
     except LookupError:
         label = "RETIRADA".encode("cp850", errors="replace")
-    cmd = b"\x1B\x61\x01"  # centralizar
+    # Avanço + init: limpa reset de fonte do corpo do cupom (fix quando escala=normal).
+    cmd = b"\n\n\n"
+    cmd += b"\x1B\x40"
+    cmd += b"\x1B\x61\x01"  # centralizar
     cmd += b"\x1B\x45\x01"  # negrito
-    cmd += _escpos_select_scale(3)
-    cmd += b"\n\n\n"
+    cmd += b"\x1B\x21\x30"  # ESC ! largura+altura
+    cmd += b"\x1D\x21\x11"  # GS ! largura+altura
+    cmd += b"\n"
     cmd += label + b"\n"
-    cmd += label + b"\n\n"
-    cmd += _escpos_reset_scale()
+    cmd += label + b"\n"
+    cmd += b"\x1B\x21\x00"
+    cmd += b"\x1D\x21\x00"
     cmd += b"\x1B\x45\x00"
     cmd += b"\x1B\x61\x00"
-    cmd += b"\n\n\n\n\n"
+    cmd += b"\n\n\n\n\n\n"
     return cmd
 
 
@@ -341,14 +346,26 @@ class PrinterService:
 
             if self.connection_type == "local":
                 return self._print_via_local(
-                    receipt_text, qr_bytes=qr_bytes, pickup_bytes=pickup_bytes, font_scale=scale
+                    receipt_text,
+                    qr_bytes=qr_bytes,
+                    pickup_bytes=pickup_bytes,
+                    font_scale=scale,
+                    is_pickup=is_pickup,
                 )
             if self.printer_type == "ipp":
                 return self._print_via_ipp(
-                    receipt_text, qr_bytes=qr_bytes, pickup_bytes=pickup_bytes, font_scale=scale
+                    receipt_text,
+                    qr_bytes=qr_bytes,
+                    pickup_bytes=pickup_bytes,
+                    font_scale=scale,
+                    is_pickup=is_pickup,
                 )
             return self._print_via_raw(
-                receipt_text, qr_bytes=qr_bytes, pickup_bytes=pickup_bytes, font_scale=scale
+                receipt_text,
+                qr_bytes=qr_bytes,
+                pickup_bytes=pickup_bytes,
+                font_scale=scale,
+                is_pickup=is_pickup,
             )
         except Exception as e:
             print(f"Erro ao imprimir: {str(e)}")
@@ -489,33 +506,14 @@ class PrinterService:
             lines.append(" Escaneie o QR abaixo")
             lines.append(" para add a rota")
             lines.append("")
-            # Não imprimir a URL em texto (era o que saía no lugar do QR / poluía)
             lines.append("")
-            lines.append("-" * W)
-            lines.append("")
-
-        if receipt.get("is_pickup"):
             lines.append("-" * W)
             lines.append("")
 
         lines.append("=" * W)
         lines.append("")
         lines.append("Obrigado pela preferência!")
-        lines.append("")
-
-        if receipt.get("is_pickup"):
-            lines.append("")
-            lines.append("*" * W)
-            label = "RETIRADA"
-            pad = max(0, (W - len(label)) // 2)
-            centered = (" " * pad + label)[:W]
-            lines.append(centered)
-            lines.append(centered)
-            lines.append(centered)
-            lines.append("*" * W)
-            lines.append("")
-
-        lines.append("")
+        # RETIRADA grande sai só via bytes ESC/POS no rodapé (_escpos_pickup_banner)
         lines.append("")
         lines.append("")
         lines.append("")
@@ -523,24 +521,31 @@ class PrinterService:
         
         return "\n".join(lines)
     
-    def _compose_escpos_payload(self, text, qr_bytes=b"", pickup_bytes=b"", font_scale=1) -> bytes:
-        """Monta buffer ESC/POS completo: init, tabela, escala, texto, QR, rodapé, avanço, corte."""
-        esc_encoding, _encoding = self._get_esc_pos_encoding()
+    def _compose_escpos_payload(
+        self,
+        text,
+        qr_bytes=b"",
+        pickup_bytes=b"",
+        font_scale=1,
+        is_pickup=False,
+    ) -> bytes:
+        """Monta buffer ESC/POS: corpo com escala do form; banner RETIRADA separado no fim."""
+        esc_encoding, encoding = self._get_esc_pos_encoding()
         text_bytes = self._encode_text_with_fallback(text)
         esc_pos_init = b"\x1B\x40"
         esc_pos_cut = b"\x1D\x56\x00"
-        feed = b"\n" * 8
-        return (
-            esc_pos_init
-            + esc_encoding
-            + _escpos_select_scale(font_scale)
-            + text_bytes
-            + _escpos_reset_scale()
-            + qr_bytes
-            + pickup_bytes
-            + feed
-            + esc_pos_cut
-        )
+        feed = b"\n" * (14 if is_pickup else 8)
+
+        payload = esc_pos_init + esc_encoding + _escpos_select_scale(font_scale) + text_bytes
+
+        if is_pickup:
+            banner = pickup_bytes or _escpos_pickup_banner(encoding)
+            # Sem reset entre corpo e banner — o banner faz ESC @ próprio
+            payload += qr_bytes + banner
+        else:
+            payload += _escpos_reset_scale() + qr_bytes
+
+        return payload + feed + esc_pos_cut
     
     def _get_esc_pos_encoding(self):
         """Retorna (bytes_cmd, encoding) para caracteres portugueses (ç, ã, é)"""
@@ -572,10 +577,9 @@ class PrinterService:
             self.printer_name_local,
         )
 
-    def _print_via_raw(self, text, qr_bytes=b"", pickup_bytes=b"", font_scale=1):
+    def _print_via_raw(self, text, qr_bytes=b"", pickup_bytes=b"", font_scale=1, is_pickup=False):
         """Imprime via socket RAW (porta 9100). qr_bytes: opcional, QR ESC/POS."""
         epoch = _generation(self._printer_key())
-        _ = _escpos_select_scale(font_scale)
 
         @retry_with_backoff(RetryConfig(
             max_retries=self.max_retries,
@@ -587,7 +591,11 @@ class PrinterService:
             if _generation(self._printer_key()) != epoch:
                 raise _QueueCancelled()
             full_command = self._compose_escpos_payload(
-                text, qr_bytes=qr_bytes, pickup_bytes=pickup_bytes, font_scale=font_scale
+                text,
+                qr_bytes=qr_bytes,
+                pickup_bytes=pickup_bytes,
+                font_scale=font_scale,
+                is_pickup=is_pickup,
             )
             
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -627,12 +635,16 @@ class PrinterService:
             print(f"Erro ao imprimir via RAW: {str(e)}")
             return False
     
-    def _print_via_ipp(self, text, qr_bytes=b"", pickup_bytes=b"", font_scale=1):
+    def _print_via_ipp(self, text, qr_bytes=b"", pickup_bytes=b"", font_scale=1, is_pickup=False):
         """Imprime via IPP com comandos ESC/POS no payload."""
         try:
             ipp_payload = self._create_ipp_request(
                 self._compose_escpos_payload(
-                    text, qr_bytes=qr_bytes, pickup_bytes=pickup_bytes, font_scale=font_scale
+                    text,
+                    qr_bytes=qr_bytes,
+                    pickup_bytes=pickup_bytes,
+                    font_scale=font_scale,
+                    is_pickup=is_pickup,
                 )
             )
             conn = http.client.HTTPConnection(self.printer_ip, self.printer_port, timeout=5)
@@ -679,7 +691,7 @@ class PrinterService:
         
         return ipp_request
     
-    def _print_via_local(self, text, qr_bytes=b"", pickup_bytes=b"", font_scale=1):
+    def _print_via_local(self, text, qr_bytes=b"", pickup_bytes=b"", font_scale=1, is_pickup=False):
         """Imprime via impressora local do Windows usando win32print com comandos ESC/POS."""
         if not HAS_WIN32PRINT:
             print("Erro: win32print não disponível. Apenas Windows suporta impressoras locais.")
@@ -697,7 +709,11 @@ class PrinterService:
         ))
         def _send_to_local_printer():
             full_content = self._compose_escpos_payload(
-                text, qr_bytes=qr_bytes, pickup_bytes=pickup_bytes, font_scale=font_scale
+                text,
+                qr_bytes=qr_bytes,
+                pickup_bytes=pickup_bytes,
+                font_scale=font_scale,
+                is_pickup=is_pickup,
             )
             
             # Abrir a impressora local
