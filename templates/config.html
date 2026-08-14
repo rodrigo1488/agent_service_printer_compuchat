@@ -558,10 +558,12 @@
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(payload)
             })
-            .then(function(r) { return r.json(); })
-            .then(function(data) {
-                if (data.success) alert('✓ ' + data.message);
-                else alert('✗ Erro: ' + (data.error || 'Falha ao cancelar a fila'));
+            .then(function(r) { return r.json().then(function(data) { return { http: r.status, data: data }; }); })
+            .then(function(res) {
+                var data = res.data || {};
+                var msg = data.message || data.error || 'Falha ao cancelar a fila';
+                if (data.success) alert('✓ ' + msg);
+                else alert('✗ ' + msg);
             })
             .catch(function(error) { alert('✗ Erro ao conectar: ' + error.message); })
             .finally(function() {

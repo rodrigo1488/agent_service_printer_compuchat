@@ -1,6 +1,8 @@
 import socket
 import http.client
 import json
+import threading
+import time
 from datetime import datetime
 
 from error_recovery import (
@@ -23,6 +25,67 @@ except ImportError:
 
 # Tamanho do módulo do QR (1-16). 10 = maior, mais fácil de escanear no celular.
 QR_MODULE_SIZE = 10
+
+_active_lock = threading.Lock()
+_active_socks = []  # (key, socket)
+_cancel_gen = {}
+
+
+class _QueueCancelled(Exception):
+    """Impressão abortada porque a fila foi cancelada."""
+
+
+def _as_int(value, default):
+    try:
+        if value is None or value == "":
+            return default
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _printer_key(connection_type, printer_ip, printer_port, printer_name_local):
+    if (connection_type or "network") == "local":
+        return ("local", str(printer_name_local or "").strip().lower())
+    return ("net", str(printer_ip or "").strip().lower(), _as_int(printer_port, 9100))
+
+
+def _bump_cancel(key):
+    with _active_lock:
+        _cancel_gen[key] = _cancel_gen.get(key, 0) + 1
+        return _cancel_gen[key]
+
+
+def _generation(key):
+    with _active_lock:
+        return _cancel_gen.get(key, 0)
+
+
+def _register_sock(key, sock):
+    with _active_lock:
+        _active_socks.append((key, sock))
+
+
+def _unregister_sock(sock):
+    with _active_lock:
+        _active_socks[:] = [item for item in _active_socks if item[1] is not sock]
+
+
+def _close_active_socks(key):
+    with _active_lock:
+        victims = [sock for k, sock in _active_socks if k == key]
+    closed = 0
+    for sock in victims:
+        try:
+            sock.shutdown(socket.SHUT_RDWR)
+        except Exception:
+            pass
+        try:
+            sock.close()
+        except Exception:
+            pass
+        closed += 1
+    return closed
 
 
 def _wrap_text_by_words(text: str, max_width: int) -> list:
@@ -288,8 +351,18 @@ class PrinterService:
             print(f"[WARN] Encoding {preferred_encoding} falhou, usando {used_encoding} como fallback")
         return text_bytes
 
+    def _printer_key(self):
+        return _printer_key(
+            self.connection_type,
+            self.printer_ip,
+            self.printer_port,
+            self.printer_name_local,
+        )
+
     def _print_via_raw(self, text, qr_bytes=b""):
         """Imprime via socket RAW (porta 9100). qr_bytes: opcional, QR ESC/POS."""
+        epoch = _generation(self._printer_key())
+
         @retry_with_backoff(RetryConfig(
             max_retries=self.max_retries,
             initial_delay=0.4,
@@ -297,6 +370,8 @@ class PrinterService:
             retryable_exceptions=(socket.timeout, socket.error, ConnectionError)
         ))
         def _send_to_printer():
+            if _generation(self._printer_key()) != epoch:
+                raise _QueueCancelled()
             esc_encoding, encoding = self._get_esc_pos_encoding()
             # Usar fallback de encoding
             text_bytes = self._encode_text_with_fallback(text)
@@ -305,18 +380,29 @@ class PrinterService:
             full_command = esc_pos_reset + esc_encoding + text_bytes + qr_bytes + esc_pos_cut
             
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             sock.settimeout(self.timeout)
+            _register_sock(self._printer_key(), sock)
             try:
-                sock.connect((self.printer_ip, self.printer_port))
+                sock.connect((self.printer_ip, int(self.printer_port)))
+                if _generation(self._printer_key()) != epoch:
+                    raise _QueueCancelled()
                 sock.sendall(full_command)
             finally:
-                sock.close()
+                _unregister_sock(sock)
+                try:
+                    sock.close()
+                except Exception:
+                    pass
             
             print(f"Pedido impresso com sucesso na impressora {self.printer_ip}:{self.printer_port}")
             return True
         
         try:
             return _send_to_printer()
+        except _QueueCancelled:
+            print(f"Impressão cancelada em {self.printer_ip}:{self.printer_port}")
+            return False
         except socket.timeout:
             print(f"Timeout ao conectar na impressora {self.printer_ip}:{self.printer_port} após múltiplas tentativas")
             return False
@@ -438,13 +524,13 @@ class PrinterService:
     def from_config(cls, cfg, timeout=4, max_retries=0):
         cfg = cfg or {}
         return cls(
-            printer_ip=cfg.get("printer_ip"),
-            printer_port=int(cfg.get("printer_port") or 9100),
-            printer_type=cfg.get("printer_type") or "raw",
-            paper_width=int(cfg.get("paper_width") or 32),
+            printer_ip=str(cfg.get("printer_ip") or "").strip() or None,
+            printer_port=_as_int(cfg.get("printer_port"), 9100),
+            printer_type=(str(cfg.get("printer_type") or "raw").strip().lower() or "raw"),
+            paper_width=_as_int(cfg.get("paper_width"), 32),
             printer_encoding=cfg.get("printer_encoding") or "cp850",
-            connection_type=cfg.get("connection_type") or "network",
-            printer_name_local=cfg.get("printer_name_local") or None,
+            connection_type=(str(cfg.get("connection_type") or "network").strip().lower() or "network"),
+            printer_name_local=str(cfg.get("printer_name_local") or "").strip() or None,
             timeout=timeout,
             max_retries=max_retries,
         )
@@ -462,32 +548,57 @@ class PrinterService:
             return False, str(e)
 
     def _escpos_clear_buffer_bytes(self):
-        # DLE ENQ 2: recupera erro (sem papel, tampa). DLE DC4 fn=8: limpa buffer (Epson).
-        # CAN + ESC @: cancela modo página e reinicia.
+        # DLE DC4 fn=8: limpa buffer de recepção (Epson TM).
+        # CAN + ESC @: cancela modo página e reinicia (ESC/POS genérico).
+        # Não enviar DLE ENQ: a impressora responde 1 byte e alguns modelos fecham o TCP.
         return (
-            bytes([0x10, 0x05, 0x02])
-            + bytes([0x10, 0x14, 0x08, 0x01, 0x03, 0x14, 0x01, 0x06, 0x02, 0x08])
+            bytes([0x10, 0x14, 0x08, 0x01, 0x03, 0x14, 0x01, 0x06, 0x02, 0x08])
             + b"\x18\x1B\x40"
         )
 
     def _cancel_raw_queue(self):
-        if not self.printer_ip:
+        ip = str(self.printer_ip or "").strip()
+        if not ip:
             return False, "IP da impressora não informado"
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(min(self.timeout, 4))
-        try:
-            sock.connect((self.printer_ip, int(self.printer_port or 9100)))
-            sock.sendall(self._escpos_clear_buffer_bytes())
-        finally:
-            sock.close()
-        print(f"[INFO] Fila cancelada em {self.printer_ip}:{self.printer_port}")
-        return True, f"Fila cancelada em {self.printer_ip}:{self.printer_port}"
+        port = _as_int(self.printer_port, 9100)
+        key = self._printer_key()
+        _bump_cancel(key)
+        interrupted = _close_active_socks(key)
+        time.sleep(0.2)
+        last_err = None
+        for _attempt in range(3):
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            sock.settimeout(min(max(self.timeout, 1), 4))
+            try:
+                sock.connect((ip, port))
+                try:
+                    sock.sendall(self._escpos_clear_buffer_bytes())
+                except Exception as send_exc:
+                    print(f"[WARN] clear buffer em {ip}:{port}: {send_exc}")
+                print(f"[INFO] Fila cancelada em {ip}:{port}")
+                return True, f"Fila cancelada em {ip}:{port}"
+            except Exception as e:
+                last_err = e
+                time.sleep(0.3)
+            finally:
+                try:
+                    sock.close()
+                except Exception:
+                    pass
+        if interrupted:
+            return True, f"Envio interrompido para {ip}:{port}"
+        return False, f"Não conectou em {ip}:{port}: {last_err}"
 
     def _cancel_ipp_queue(self):
-        if not self.printer_ip:
+        ip = str(self.printer_ip or "").strip()
+        if not ip:
             return False, "IP da impressora não informado"
+        key = self._printer_key()
+        _bump_cancel(key)
+        _close_active_socks(key)
         try:
-            conn = http.client.HTTPConnection(self.printer_ip, int(self.printer_port or 631), timeout=min(self.timeout, 4))
+            conn = http.client.HTTPConnection(ip, _as_int(self.printer_port, 631), timeout=min(max(self.timeout, 1), 4))
             payload = self._create_ipp_purge_jobs()
             headers = {"Content-Type": "application/ipp", "Content-Length": str(len(payload))}
             conn.request("POST", "/ipp/print", payload, headers)
@@ -495,18 +606,17 @@ class PrinterService:
             conn.close()
             if response.status not in (200, 204):
                 raise RuntimeError(f"IPP {response.status}")
-            print(f"[INFO] Fila IPP cancelada em {self.printer_ip}:{self.printer_port}")
-            return True, f"Fila cancelada via IPP em {self.printer_ip}:{self.printer_port}"
+            print(f"[INFO] Fila IPP cancelada em {ip}:{self.printer_port}")
+            return True, f"Fila cancelada via IPP em {ip}:{self.printer_port}"
         except Exception as ipp_exc:
             # Muitas térmicas "IPP" ainda escutam RAW 9100 — tenta limpar o buffer ESC/POS.
             try:
-                port = int(self.printer_port or 9100)
                 raw = PrinterService(
-                    printer_ip=self.printer_ip,
-                    printer_port=9100 if port != 9100 else port,
+                    printer_ip=ip,
+                    printer_port=9100,
                     printer_type="raw",
                     connection_type="network",
-                    timeout=min(self.timeout, 4),
+                    timeout=min(max(self.timeout, 1), 4),
                     max_retries=0,
                 )
                 ok, msg = raw._cancel_raw_queue()
@@ -533,6 +643,7 @@ class PrinterService:
             return False, "Impressora local só está disponível no Windows"
         if not self.printer_name_local:
             return False, "Nome da impressora local não informado"
+        _bump_cancel(self._printer_key())
         handle = win32print.OpenPrinter(self.printer_name_local)
         deleted = 0
         try:

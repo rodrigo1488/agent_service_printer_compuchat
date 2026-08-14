@@ -1116,7 +1116,7 @@ def cancel_print_queue():
             results = [_cancel_printer_queue(p) for p in targets]
             ok = all(r.get("ok") for r in results)
             msg = "; ".join(r.get("message") or "" for r in results)
-            return jsonify({"success": ok, "message": msg, "results": results}), (200 if ok else 500)
+            return jsonify({"success": ok, "message": msg, "results": results})
 
         from printer_service import PrinterService
 
@@ -1124,7 +1124,7 @@ def cancel_print_queue():
         ok, message = printer.cancel_queue()
         if ok:
             return jsonify({"success": True, "message": message})
-        return jsonify({"success": False, "error": message}), 500
+        return jsonify({"success": False, "error": message, "message": message})
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
 
