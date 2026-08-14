@@ -74,7 +74,7 @@ def _escpos_qr_bytes(url: str) -> bytes:
 class PrinterService:
     """Serviço para impressão em impressoras de rede ou locais (Windows)"""
     
-    def __init__(self, printer_ip=None, printer_port=9100, printer_type='raw', paper_width=32, printer_encoding='cp850', connection_type='network', printer_name_local=None):
+    def __init__(self, printer_ip=None, printer_port=9100, printer_type='raw', paper_width=32, printer_encoding='cp850', connection_type='network', printer_name_local=None, timeout=10, max_retries=2):
         """
         Inicializa o serviço de impressão
 
@@ -94,6 +94,8 @@ class PrinterService:
         self.paper_width = int(paper_width) if paper_width else 32
         self.printer_encoding = (printer_encoding or 'cp850').lower()
         self.printer_name_local = printer_name_local
+        self.timeout = max(1, int(timeout or 10))
+        self.max_retries = max(0, int(max_retries if max_retries is not None else 2))
     
     def print_receipt(self, receipt_data):
         """
@@ -289,9 +291,9 @@ class PrinterService:
     def _print_via_raw(self, text, qr_bytes=b""):
         """Imprime via socket RAW (porta 9100). qr_bytes: opcional, QR ESC/POS."""
         @retry_with_backoff(RetryConfig(
-            max_retries=2,
-            initial_delay=0.5,
-            max_delay=5.0,
+            max_retries=self.max_retries,
+            initial_delay=0.4,
+            max_delay=2.0,
             retryable_exceptions=(socket.timeout, socket.error, ConnectionError)
         ))
         def _send_to_printer():
@@ -302,9 +304,8 @@ class PrinterService:
             esc_pos_cut = b"\x1D\x56\x00"
             full_command = esc_pos_reset + esc_encoding + text_bytes + qr_bytes + esc_pos_cut
             
-            # Conectar e enviar com timeout maior
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(10)  # Aumentado de 5 para 10 segundos
+            sock.settimeout(self.timeout)
             try:
                 sock.connect((self.printer_ip, self.printer_port))
                 sock.sendall(full_command)

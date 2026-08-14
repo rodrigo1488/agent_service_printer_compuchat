@@ -178,7 +178,7 @@ def _items_for_printer(items: List[Dict[str, Any]], group_names: List[str]) -> L
     return [item for item in items if str(item.get("grupo") or "Outros").strip().lower() in want]
 
 
-def _send_receipt(printer_cfg: Dict[str, Any], payload: Dict[str, Any]) -> None:
+def _send_receipt(printer_cfg: Dict[str, Any], payload: Dict[str, Any], *, timeout: int = 4) -> bool:
     from printer_service import PrinterService
     from receipt_formatter import format_order_receipt
 
@@ -190,15 +190,22 @@ def _send_receipt(printer_cfg: Dict[str, Any], payload: Dict[str, Any]) -> None:
         printer_encoding=printer_cfg.get("printer_encoding") or "cp850",
         connection_type=printer_cfg.get("connection_type") or "network",
         printer_name_local=printer_cfg.get("printer_name_local") or None,
+        timeout=timeout,
+        max_retries=0,
     )
-    printer.print_receipt(format_order_receipt(payload))
+    return bool(printer.print_receipt(format_order_receipt(payload)))
 
 
-def _print_kitchen(payload: Dict[str, Any]) -> None:
+def _print_kitchen(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Tenta imprimir sem bloquear o pedido. Sempre devolve printed true/false."""
+    info = {"printed": False, "attempted": 0, "failed": 0, "error": ""}
     try:
+        from concurrent.futures import ThreadPoolExecutor, wait
+
         printers = db.get_printers()
         if not printers:
-            return
+            info["error"] = "Nenhuma impressora configurada"
+            return info
         items = []
         for raw in payload.get("menuItems") or []:
             if not isinstance(raw, dict):
@@ -207,7 +214,8 @@ def _print_kitchen(payload: Dict[str, Any]) -> None:
             item["grupo"] = _item_grupo(item)
             items.append(item)
         if not items:
-            return
+            info["printed"] = True
+            return info
 
         routes = _print_routes()
         jobs: List[tuple] = []
@@ -232,15 +240,49 @@ def _print_kitchen(payload: Dict[str, Any]) -> None:
                 for p in targets:
                     jobs.append((p, leftover))
 
-        for printer_cfg, subset in jobs:
+        if not jobs:
+            info["error"] = "Nenhuma rota de impressão para os itens"
+            return info
+
+        def _run_job(printer_cfg: Dict[str, Any], subset: List[Dict[str, Any]]) -> bool:
             job = dict(payload)
             job["menuItems"] = subset
             try:
-                _send_receipt(printer_cfg, job)
-            except Exception:
-                continue
+                return _send_receipt(printer_cfg, job, timeout=4)
+            except Exception as exc:
+                print(f"[POS] impressora falhou: {exc}")
+                return False
+
+        ok = 0
+        fail = 0
+        errors: List[str] = []
+        with ThreadPoolExecutor(max_workers=min(4, len(jobs))) as pool:
+            futures = [pool.submit(_run_job, cfg, subset) for cfg, subset in jobs]
+            done, pending = wait(futures, timeout=8)
+            for fut in pending:
+                fail += 1
+                errors.append("impressora não respondeu")
+            for fut in done:
+                info["attempted"] += 1
+                try:
+                    if fut.result():
+                        ok += 1
+                    else:
+                        fail += 1
+                except Exception:
+                    fail += 1
+        info["failed"] = fail
+        info["printed"] = ok > 0 and fail == 0
+        if fail and not ok:
+            info["error"] = errors[0] if errors else "Falha ao imprimir. Verifique o papel da impressora."
+        elif fail:
+            info["printed"] = False
+            info["error"] = "Pedido gravado, mas uma impressora não concluiu."
+        return info
     except Exception as exc:
         print(f"[POS] impressão cozinha falhou: {exc}")
+        info["error"] = str(exc)
+        return info
 
 
 @pos_bp.route("/pos/health", methods=["GET"])
@@ -397,6 +439,12 @@ def pos_orders():
     client_order_id = str(body.get("clientOrderId") or "").strip() or str(uuid.uuid4())
     existing = db.get_pos_order(client_order_id)
     if existing:
+        if existing.get("ok") and not existing.get("printed"):
+            print_payload = _order_print_payload(body, existing)
+            print_info = _print_kitchen(print_payload)
+            existing["printed"] = bool(print_info.get("printed"))
+            existing["printError"] = print_info.get("error") or ""
+            db.save_pos_order(client_order_id, existing)
         return jsonify({"ok": True, "reused": True, **existing})
 
     menu_items = body.get("menuItems") or []
@@ -475,12 +523,15 @@ def pos_orders():
         "responder": {"name": customer_name},
         "submittedAt": now.isoformat(),
     }
-    _print_kitchen(print_payload)
-
     result = {
         "ok": True,
+        "printed": False,
+        "printError": "",
         "clientOrderId": client_order_id,
         "protocol": protocol,
+        "tableNumber": table_number,
+        "garcomName": garcom_name,
+        "customerName": customer_name,
         "uniplus": {
             "contaId": uniplus.get("conta_id"),
             "numeromesa": uniplus.get("numeromesa"),
@@ -488,4 +539,21 @@ def pos_orders():
         },
     }
     db.save_pos_order(client_order_id, result)
+    print_info = _print_kitchen(print_payload)
+    result["printed"] = bool(print_info.get("printed"))
+    result["printError"] = print_info.get("error") or ""
+    db.save_pos_order(client_order_id, result)
     return jsonify(result)
+
+
+def _order_print_payload(body: Dict[str, Any], existing: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "formName": "Pedido mesa",
+        "protocol": existing.get("protocol") or "",
+        "tableNumber": existing.get("tableNumber") or body.get("tableNumber") or "",
+        "garcomName": existing.get("garcomName") or body.get("garcomName") or "",
+        "orderType": "mesa",
+        "menuItems": body.get("menuItems") or [],
+        "responder": {"name": existing.get("customerName") or body.get("customerName") or "Cliente"},
+        "submittedAt": datetime.now(timezone.utc).isoformat(),
+    }
