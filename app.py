@@ -2,6 +2,7 @@
 import os
 import sys
 import threading
+import time
 from datetime import datetime
 from typing import List, Optional
 from flask import Flask, request, redirect, url_for, render_template, jsonify, send_file
@@ -110,9 +111,56 @@ def _pos_images_for_ui():
     return out
 
 
+_printer_probe_cache = {"at": 0.0, "items": []}
+_PRINTER_PROBE_TTL_SEC = 20.0
+
+
+def _printer_health_cached():
+    """Probe TCP das térmicas com cache — o /health do POS não pode esperar isso."""
+    now = time.monotonic()
+    cached_at = float(_printer_probe_cache.get("at") or 0)
+    if _printer_probe_cache.get("items") is not None and now - cached_at < _PRINTER_PROBE_TTL_SEC:
+        return _printer_probe_cache["items"]
+    from error_recovery import ConnectionHealthChecker
+
+    printers = db.get_printers()
+    printer_health = []
+    for p in printers:
+        if p.get("connection_type") == "network":
+            printer_ip = p.get("printer_ip", "")
+            printer_port = p.get("printer_port", 9100)
+            is_accessible = False
+            if printer_ip:
+                is_accessible = ConnectionHealthChecker.check_printer_connection(
+                    printer_ip, printer_port, timeout=0.4
+                )
+            printer_health.append(
+                {
+                    "device_id": p.get("device_id", ""),
+                    "name": p.get("name") or p.get("device_id") or "",
+                    "connection_type": "network",
+                    "printer_ip": printer_ip,
+                    "printer_port": printer_port,
+                    "accessible": is_accessible,
+                }
+            )
+        else:
+            printer_health.append(
+                {
+                    "device_id": p.get("device_id", ""),
+                    "name": p.get("name") or p.get("device_id") or "",
+                    "connection_type": "local",
+                    "accessible": True,
+                }
+            )
+    _printer_probe_cache["at"] = now
+    _printer_probe_cache["items"] = printer_health
+    return printer_health
+
+
 def _build_health_status():
     """Monta o payload de saúde usado por /health e /status."""
-    from error_recovery import ConnectionHealthChecker, thread_monitor
+    from error_recovery import thread_monitor
     from agent import _agent_threads
 
     health_status = {
@@ -133,37 +181,7 @@ def _build_health_status():
         },
     }
 
-    printers = db.get_printers()
-    printer_health = []
-    for p in printers:
-        if p.get("connection_type") == "network":
-            printer_ip = p.get("printer_ip", "")
-            printer_port = p.get("printer_port", 9100)
-            is_accessible = (
-                ConnectionHealthChecker.check_printer_connection(printer_ip, printer_port)
-                if printer_ip
-                else False
-            )
-            printer_health.append(
-                {
-                    "device_id": p.get("device_id", ""),
-                    "name": p.get("name") or p.get("device_id") or "",
-                    "connection_type": "network",
-                    "printer_ip": printer_ip,
-                    "printer_port": printer_port,
-                    "accessible": is_accessible,
-                }
-            )
-        else:
-            printer_health.append(
-                {
-                    "device_id": p.get("device_id", ""),
-                    "name": p.get("name") or p.get("device_id") or "",
-                    "connection_type": "local",
-                    "accessible": True,
-                }
-            )
-
+    printer_health = _printer_health_cached()
     health_status["printers"]["health"] = printer_health
 
     # UniPlus: NÃO abrir conexão no health (Unico interpreta sessão concorrente).
@@ -405,10 +423,12 @@ def pos_images_sync_ui():
 
 @app.route("/health", methods=["GET"])
 def health():
-    """Health check JSON para monitoramento."""
-    health_status = _build_health_status()
-    status_code = 200 if health_status["status"] == "ok" else 503
-    return jsonify(health_status), status_code
+    """Liveness rápido para o POS na LAN. Não sonda impressoras (isso travava o tablet)."""
+    return jsonify({
+        "status": "ok",
+        "message": "Print Agent is running",
+        "timestamp": datetime.now().isoformat(),
+    }), 200
 
 
 @app.route("/status")
@@ -1164,14 +1184,18 @@ def run_flask():
         print("[WARN] waitress não instalado; usando Flask de desenvolvimento. pip install waitress")
         app.run(host=host, port=port, debug=False, use_reloader=False, threaded=True)
         return
-    print(f"[INFO] Waitress escutando em http://{host}:{port} ({threads} threads)")
+    print(f"[INFO] Waitress escutando em http://{host}:{port} ({threads} threads) — LAN IPv4")
     serve(
         app,
         host=host,
         port=port,
-        threads=max(4, threads),
+        threads=max(8, threads),
         channel_timeout=120,
+        connection_limit=200,
+        backlog=64,
         ident="PrintAgent",
+        ipv4=True,
+        ipv6=False,
         clear_untrusted_proxy_headers=True,
     )
 
