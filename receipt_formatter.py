@@ -15,6 +15,51 @@ def _utc_to_brasil_str(dt_utc):
     return dt_brasil.strftime("%d/%m/%Y %H:%M:%S")
 
 
+def _resolve_size_label_from_db(item: dict) -> str:
+    product_id = item.get("productId") or item.get("product_id")
+    option_id = item.get("optionId") or item.get("variationOptionId") or item.get("baseOptionId")
+    id_uniplus = item.get("idUniplus") or item.get("id_uniplus")
+    
+    if not product_id and not option_id and not id_uniplus:
+        return ""
+        
+    try:
+        import db
+        if product_id and option_id:
+            product = db.get_pos_product(int(product_id))
+            if product:
+                for variation in product.get("variations") or []:
+                    for opt in variation.get("options") or []:
+                        if int(opt.get("id") or 0) == int(option_id):
+                            label = str(opt.get("label") or "").strip()
+                            if label:
+                                return label
+                                
+        if id_uniplus:
+            id_uniplus_str = str(id_uniplus).strip()
+            for p in db.list_pos_products():
+                for variation in p.get("variations") or []:
+                    for opt in variation.get("options") or []:
+                        if str(opt.get("idUniplus") or "").strip() == id_uniplus_str:
+                            label = str(opt.get("label") or "").strip()
+                            if label:
+                                return label
+                                
+        if option_id:
+            option_id_val = int(option_id)
+            for p in db.list_pos_products():
+                for variation in p.get("variations") or []:
+                    for opt in variation.get("options") or []:
+                        if int(opt.get("id") or 0) == option_id_val:
+                            label = str(opt.get("label") or "").strip()
+                            if label:
+                                return label
+    except Exception as e:
+        print(f"[ERROR] Erro ao buscar tamanho no banco de dados: {e}")
+        
+    return ""
+
+
 def format_order_receipt(data: dict) -> dict:
     """Formata os dados do pedido para impressão."""
     form_name = data.get("formName", "Pedido")
@@ -136,23 +181,64 @@ def format_order_receipt(data: dict) -> dict:
         if item_type == "halfAndHalf":
             h1 = str(item.get("half1Name") or item.get("half1_name") or "").strip()
             h2 = str(item.get("half2Name") or item.get("half2_name") or "").strip()
+            original_name = name
             if (not h1 or not h2) and name:
-                # Fallback: "Meio a meio: Sabor A / Sabor B"
-                raw = name
-                for prefix in ("Meio a meio:", "MEIO A MEIO:", "meio a meio:"):
-                    if raw.lower().startswith(prefix.lower()):
-                        raw = raw[len(prefix):].strip()
-                        break
-                if " / " in raw:
-                    parts = [p.strip() for p in raw.split(" / ", 1)]
-                    if len(parts) == 2:
-                        h1 = h1 or parts[0]
-                        h2 = h2 or parts[1]
+                # Se houver ':' que separa os sabores do resto (ex: "Meio a Meio Grande: Sabor A / Sabor B")
+                if ":" in name:
+                    parts_colon = name.split(":", 1)
+                    raw_flavors = parts_colon[1].strip()
+                    if " / " in raw_flavors:
+                        parts = [p.strip() for p in raw_flavors.split(" / ", 1)]
+                        if len(parts) == 2:
+                            h1 = h1 or parts[0]
+                            h2 = h2 or parts[1]
+                else:
+                    raw = name
+                    for prefix in ("Meio a meio:", "MEIO A MEIO:", "meio a meio:", "Meio a meio", "MEIO A MEIO", "meio a meio"):
+                        if raw.lower().startswith(prefix.lower()):
+                            raw = raw[len(prefix):].strip()
+                            break
+                    if " / " in raw:
+                        parts = [p.strip() for p in raw.split(" / ", 1)]
+                        if len(parts) == 2:
+                            h1 = h1 or parts[0]
+                            h2 = h2 or parts[1]
             if h1:
                 half_lines.append(f"1/2 {h1.upper()}")
             if h2:
                 half_lines.append(f"1/2 {h2.upper()}")
-            name = "MEIO A MEIO"
+            
+            # Buscar tamanho/variação nos campos do item ou no nome original
+            size_info = ""
+            for key in ("optionLabel", "option_label", "optionName", "option_name", "variationName", "variationLabel", "variation", "size", "tamanho"):
+                val = str(item.get(key) or "").strip()
+                if val:
+                    size_info = val
+                    break
+            
+            if not size_info:
+                size_info = _resolve_size_label_from_db(item)
+            
+            if not size_info and original_name:
+                import re
+                clean_name = original_name.upper()
+                if h1:
+                    clean_name = clean_name.replace(h1.upper(), "")
+                if h2:
+                    clean_name = clean_name.replace(h2.upper(), "")
+                for term in ("MEIO A MEIO", "1/2 A 1/2", "MEIO/MEIO", "PIZZA"):
+                    clean_name = clean_name.replace(term, "")
+                clean_name = re.sub(r"[^A-ZÁÉÍÓÚÂÊÔÃÕÇ\s]", " ", clean_name)
+                words = [w.strip() for w in clean_name.split() if w.strip()]
+                ignored_words = {"DE", "COM", "DA", "DO", "E", "SABOR", "SABORES"}
+                size_words = [w for w in words if w not in ignored_words]
+                if size_words:
+                    size_info = " ".join(size_words)
+            
+            if size_info:
+                name = f"MEIO A MEIO {size_info.upper()}"
+            else:
+                name = "MEIO A MEIO"
         elif item_type == "combo" and "combo" not in str(name).lower():
             name = f"{name} (Combo)"
 

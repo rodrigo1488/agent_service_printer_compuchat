@@ -423,7 +423,7 @@ class PrinterService:
                 half_lines = item.get('half_lines') or []
                 is_half = item.get('type') == 'halfAndHalf' or bool(half_lines)
                 # Meio a meio: título curto; sabores em linhas próprias (evita corte "..")
-                if is_half:
+                if is_half and not name.upper().startswith("MEIO A MEIO"):
                     name = "MEIO A MEIO"
                 name_one_line = (name[: name_width - 2] + "..") if len(name) > name_width else name
                 qty = item.get('quantity', 1) or 1
@@ -467,6 +467,9 @@ class PrinterService:
                     while obs_text:
                         lines.append(obs_text[:W])
                         obs_text = ("    " + obs_text[W:]) if len(obs_text) > W else ""
+                
+                # Adiciona espaçamento em branco após o item
+                lines.append("")
 
             lines.append("")
 
