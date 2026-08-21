@@ -11,7 +11,6 @@ from flask import Blueprint, jsonify, request, send_file
 
 import db
 from pos_catalog import media_dir, sync_catalog_from_cloud
-from pos_print_worker import schedule_kitchen_print
 from uniplus_handler import (
     get_open_mesa_conta,
     handle_uniplus_job,
@@ -221,23 +220,20 @@ def _printer_catalog() -> List[Dict[str, Any]]:
 
 
 def _assign_printer(grupo: str, printers: List[Dict[str, Any]], routes: Dict[str, List[str]]) -> Dict[str, str]:
+    """Só atribui impressora se o grupo estiver na rota (ou se a rota for '*'). Sem fallback."""
     g = (grupo or "Outros").strip().lower()
     if not printers:
-        return {"printerDeviceId": "", "printerName": "Pedidos"}
+        return {"printerDeviceId": "", "printerName": ""}
     if not routes:
         first = printers[0]
         return {"printerDeviceId": first["deviceId"], "printerName": first["name"]}
-    leftover = None
     for p in printers:
         did = str(p.get("deviceId") or "").strip().lower()
         groups = routes.get(did) or []
         names = {str(x).strip().lower() for x in groups}
-        if "*" in names:
-            leftover = leftover or p
-        if g in names:
+        if "*" in names or g in names:
             return {"printerDeviceId": p["deviceId"], "printerName": p["name"]}
-    target = leftover or printers[0]
-    return {"printerDeviceId": target["deviceId"], "printerName": target["name"]}
+    return {"printerDeviceId": "", "printerName": ""}
 
 
 def _send_receipt(printer_cfg: Dict[str, Any], payload: Dict[str, Any], *, timeout: int = 4) -> bool:
@@ -310,9 +306,11 @@ def _print_kitchen(payload: Dict[str, Any]) -> Dict[str, Any]:
         routes = _print_routes()
         jobs: List[tuple] = []
         if not routes:
+            # Sem rotas configuradas: mantém comportamento antigo (todas as impressoras).
             jobs = [(p, items) for p in printers]
         else:
-            used = set()
+            # Só imprime itens cujo grupo está na rota da impressora.
+            # Grupos sem impressora (e sem rota "*") são ignorados — sem fallback.
             for p in printers:
                 device_id = str(p.get("device_id") or "").strip().lower()
                 groups = routes.get(device_id)
@@ -322,16 +320,26 @@ def _print_kitchen(payload: Dict[str, Any]) -> Dict[str, Any]:
                 if not subset:
                     continue
                 jobs.append((p, subset))
-                used.update(id(it) for it in subset)
-            leftover = [it for it in items if id(it) not in used]
-            if leftover:
-                star = [p for p in printers if "*" in (routes.get(str(p.get("device_id") or "").strip().lower()) or [])]
-                targets = star or printers
-                for p in targets:
-                    jobs.append((p, leftover))
+            skipped = [
+                it
+                for it in items
+                if not any(
+                    (str(g).strip() == "*" or str(g).strip().lower() == str(it.get("grupo") or "Outros").strip().lower())
+                    for groups in routes.values()
+                    for g in groups
+                )
+            ]
+            if skipped:
+                nomes = ", ".join(
+                    str(it.get("productName") or it.get("name") or "?") for it in skipped[:8]
+                )
+                print(
+                    f"[POS] {len(skipped)} item(ns) sem rota de impressão (grupo fora das impressoras): {nomes}"
+                )
 
         if not jobs:
-            info["error"] = "Nenhuma rota de impressão para os itens"
+            # Pedido só com grupos sem impressora: nada a imprimir (não é erro).
+            info["printed"] = True
             return info
 
         def _run_job(printer_cfg: Dict[str, Any], subset: List[Dict[str, Any]]) -> bool:
@@ -346,9 +354,11 @@ def _print_kitchen(payload: Dict[str, Any]) -> Dict[str, Any]:
         ok = 0
         fail = 0
         errors: List[str] = []
+        # Espera o suficiente para o POS receber printed=true/false real (não async).
+        wait_timeout = max(12, 4 * len(jobs) + 4)
         with ThreadPoolExecutor(max_workers=min(4, len(jobs))) as pool:
             futures = [pool.submit(_run_job, cfg, subset) for cfg, subset in jobs]
-            done, pending = wait(futures, timeout=8)
+            done, pending = wait(futures, timeout=wait_timeout)
             for fut in pending:
                 fail += 1
                 errors.append("impressora não respondeu")
@@ -362,12 +372,12 @@ def _print_kitchen(payload: Dict[str, Any]) -> Dict[str, Any]:
                 except Exception:
                     fail += 1
         info["failed"] = fail
-        info["printed"] = ok > 0 and fail == 0
+        # Sucesso se ao menos uma impressora concluiu (cupom saiu).
+        info["printed"] = ok > 0
         if fail and not ok:
             info["error"] = errors[0] if errors else "Falha ao imprimir. Verifique o papel da impressora."
         elif fail:
-            info["printed"] = False
-            info["error"] = "Pedido gravado, mas uma impressora não concluiu."
+            info["error"] = "Pedido impresso, mas uma impressora não concluiu."
         return info
     except Exception as exc:
         print(f"[POS] impressão cozinha falhou: {exc}")
@@ -660,12 +670,10 @@ def pos_orders():
         if existing.get("pending"):
             return jsonify({"error": "order_in_progress", "clientOrderId": client_order_id}), 409
         if existing.get("ok") and not existing.get("printed"):
-            schedule_kitchen_print(
-                client_order_id,
-                _order_print_payload(body, existing),
-                _print_kitchen,
-            )
-            existing["printError"] = existing.get("printError") or "Impressão em andamento"
+            print_info = _print_kitchen(_order_print_payload(body, existing))
+            existing["printed"] = bool(print_info.get("printed"))
+            existing["printError"] = print_info.get("error") or ""
+            db.save_pos_order(client_order_id, existing)
         return jsonify({"ok": True, "reused": True, **existing})
 
     menu_items = body.get("menuItems") or []
@@ -744,10 +752,13 @@ def pos_orders():
         "responder": {"name": customer_name},
         "submittedAt": now.isoformat(),
     }
+    # Imprime antes de responder: o tablet usa `printed` na UI e interpretava
+    # "Impressão em andamento" (async) como "não impresso".
+    print_info = _print_kitchen(print_payload)
     result = {
         "ok": True,
-        "printed": False,
-        "printError": "",
+        "printed": bool(print_info.get("printed")),
+        "printError": print_info.get("error") or "",
         "clientOrderId": client_order_id,
         "protocol": protocol,
         "tableNumber": table_number,
@@ -760,8 +771,6 @@ def pos_orders():
         },
     }
     db.save_pos_order(client_order_id, result)
-    schedule_kitchen_print(client_order_id, print_payload, _print_kitchen)
-    result["printError"] = "Impressão em andamento"
     return jsonify(result)
 
 
