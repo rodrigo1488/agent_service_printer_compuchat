@@ -26,6 +26,14 @@ from uniplus_handler import (
 )
 from uniplus_handler import OperationalError as UniplusOperationalError
 from uniplus_handler import InterfaceError as UniplusInterfaceError
+from maisgestao_handler import (
+    MaisGestaoOperationalError,
+    MaisGestaoPermanentError,
+    format_maisgestao_log_message,
+    get_erp_target,
+    handle_maisgestao_job,
+    is_maisgestao_enabled,
+)
 try:
     import websocket
 except ImportError:
@@ -253,9 +261,52 @@ def _send_uniplus_ack(ws, payload: dict):
 
 
 def _handle_uniplus_job(ws, job_id: int, conteudo: dict):
-    """Processa job UniPlus (INSERT CONTAMESA) e envia ACK."""
-    _log("INFO", f"Job {job_id}: processando uniplus_job...")
+    """Processa job UniPlus/Mais Gestão (INSERT conta delivery) e envia ACK."""
+    erp = get_erp_target(db)
+    _log("INFO", f"Job {job_id}: processando uniplus_job (erp_target={erp})...")
     try:
+        if erp == "maisgestao":
+            if not is_maisgestao_enabled(db):
+                raise MaisGestaoPermanentError(
+                    "ERR_PDV_CONFIG: Mais Gestão desabilitado ou sem pdv_lan_url"
+                )
+
+            @retry_with_backoff(
+                RetryConfig(
+                    max_retries=2,
+                    initial_delay=0.8,
+                    max_delay=6.0,
+                    retryable_exceptions=(MaisGestaoOperationalError,),
+                )
+            )
+            def _run_mg():
+                return handle_maisgestao_job(db, conteudo or {})
+
+            result = _run_mg()
+            conta_id = result.get("conta_id")
+            message = result.get("message") or result.get("action") or "ok"
+            log_msg = format_maisgestao_log_message(result)
+            db.add_print_log(job_id, "done", log_msg, kind="uniplus", detail=result)
+            ack = {
+                "event": "ack",
+                "job_id": job_id,
+                "status": "done",
+                "message": message,
+                "maisGestaoContaId": conta_id,
+                "maisGestaoAction": result.get("action"),
+                "uniplusContaId": conta_id,
+                "uniplusAction": result.get("action"),
+                "protocol": result.get("protocol"),
+            }
+            _send_uniplus_ack(ws, ack)
+            _log(
+                "INFO",
+                f"Job {job_id}: MaisGestão {result.get('action')} contaId={conta_id} "
+                f"protocol={result.get('protocol')} "
+                f"cliente={result.get('cliente')} itens={result.get('itens_count')}",
+            )
+            return
+
         if not is_uniplus_enabled(db):
             raise UniplusPermanentError(
                 "ERR_UNIPLUS_CONFIG: UniPlus desabilitado ou sem connection string"
@@ -296,13 +347,16 @@ def _handle_uniplus_job(ws, job_id: int, conteudo: dict):
             f"total={result.get('valortotal')}",
         )
     except Exception as e:
-        permanent = isinstance(e, UniplusPermanentError)
+        permanent = isinstance(
+            e, (UniplusPermanentError, MaisGestaoPermanentError)
+        )
         msg = str(e)
-        _log("ERROR", f"Job {job_id}: UniPlus erro{' permanente' if permanent else ''}: {msg}")
+        _log("ERROR", f"Job {job_id}: ERP erro{' permanente' if permanent else ''}: {msg}")
         err_detail = {
             "action": "error",
             "error": msg,
             "permanent": permanent,
+            "erp_target": erp,
             "protocol": (conteudo or {}).get("protocol"),
             "formResponseId": (conteudo or {}).get("formResponseId"),
             "cliente": ((conteudo or {}).get("contamesa") or {}).get("nomecliente"),

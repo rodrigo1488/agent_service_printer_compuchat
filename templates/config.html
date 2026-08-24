@@ -196,9 +196,43 @@
 
     <div class="tab-panel" id="tab-uniplus">
         <div class="section-card">
+            <h3 style="margin-bottom: 0.4rem;">ERP destino do delivery</h3>
+            <p class="hint" style="margin-bottom: 0.85rem;">
+                O evento <code>uniplus_job</code> do Compuchat é gravado no UniPlus (Postgres) ou no PDV Mais Gestão (LAN API).
+                No cardápio Compuchat, o código do produto deve ser o <strong>EAN</strong> ou o <strong>UUID</strong> do produto no Mais Gestão.
+            </p>
+            <div class="form-group">
+                <label for="erp_target">Destino</label>
+                <select id="erp_target" name="erp_target">
+                    <option value="uniplus" {% if erp_target != 'maisgestao' %}selected{% endif %}>UniPlus</option>
+                    <option value="maisgestao" {% if erp_target == 'maisgestao' %}selected{% endif %}>Mais Gestão (PDV LAN)</option>
+                </select>
+            </div>
+            <div class="grid-2">
+                <div class="form-group">
+                    <label for="pdv_lan_url">URL LAN do PDV</label>
+                    <input type="text" id="pdv_lan_url" name="pdv_lan_url"
+                           value="{{ pdv_lan_url }}"
+                           placeholder="http://127.0.0.1:5050">
+                </div>
+                <div class="form-group">
+                    <label for="pdv_lan_email">E-mail login PDV</label>
+                    <input type="text" id="pdv_lan_email" name="pdv_lan_email"
+                           value="{{ pdv_lan_email }}"
+                           placeholder="usuario@empresa.com">
+                </div>
+                <div class="form-group">
+                    <label for="pdv_lan_password">Senha login PDV</label>
+                    <input type="password" id="pdv_lan_password" name="pdv_lan_password"
+                           value=""
+                           placeholder="{% if pdv_lan_password %}•••••• (deixe em branco para manter){% else %}senha{% endif %}">
+                </div>
+            </div>
+        </div>
+        <div class="section-card">
             <h3 style="margin-bottom: 0.4rem;">UniPlus Gourmet</h3>
             <p class="hint" style="margin-bottom: 0.85rem;">
-                Quando o Compuchat enviar <code>uniplus_job</code>, o agente grava a entrega em CONTAMESA/CONTAMESAITEM.
+                Quando o Compuchat enviar <code>uniplus_job</code> e o destino for UniPlus, o agente grava a entrega em CONTAMESA/CONTAMESAITEM.
                 O Unico costuma recusar abrir se houver outra sessão no Postgres — por isso o Agent só conecta sob demanda.
             </p>
             <div class="form-group check-row">

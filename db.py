@@ -37,6 +37,11 @@ DEFAULT_CONFIG = {
     "pos_catalog_updated_at": "",
     "pos_last_sync_error": "",
     "uniplus_mesa_tipopedido": "1",
+    "erp_target": "uniplus",
+    "pdv_lan_url": "http://127.0.0.1:5050",
+    "pdv_lan_email": "",
+    "pdv_lan_password": "",
+    "pdv_lan_token": "",
 }
 PRINTER_KEYS = ("device_id", "token", "printer_ip", "printer_port", "printer_type", "paper_width", "printer_encoding", "name", "connection_type", "printer_name_local")
 

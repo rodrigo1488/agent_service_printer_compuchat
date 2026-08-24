@@ -61,6 +61,12 @@ def _config_context():
     )
     pos_api_token = db.get_config("pos_api_token") or ""
     uniplus_mesa_tipopedido = db.get_config("uniplus_mesa_tipopedido") or "1"
+    erp_target = (db.get_config("erp_target") or "uniplus").strip().lower()
+    if erp_target not in ("uniplus", "maisgestao"):
+        erp_target = "uniplus"
+    pdv_lan_url = db.get_config("pdv_lan_url") or "http://127.0.0.1:5050"
+    pdv_lan_email = db.get_config("pdv_lan_email") or ""
+    pdv_lan_password = db.get_config("pdv_lan_password") or ""
     pos_images = _pos_images_for_ui()
     return {
         "active_nav": "config",
@@ -79,6 +85,10 @@ def _config_context():
         "uniplus_product_sync_poll": uniplus_product_sync_poll,
         "pos_api_token": pos_api_token,
         "uniplus_mesa_tipopedido": uniplus_mesa_tipopedido,
+        "erp_target": erp_target,
+        "pdv_lan_url": pdv_lan_url,
+        "pdv_lan_email": pdv_lan_email,
+        "pdv_lan_password": pdv_lan_password,
         "pos_catalog_version": db.get_config("pos_catalog_version") or "0",
         "pos_last_sync_error": db.get_config("pos_last_sync_error") or "",
         "pos_images": pos_images,
@@ -250,6 +260,30 @@ def config():
                 db.set_config("uniplus_last_error", "")
             else:
                 db.set_config("uniplus_last_error", "")
+
+            erp_target = (request.form.get("erp_target") or "uniplus").strip().lower()
+            if erp_target not in ("uniplus", "maisgestao"):
+                erp_target = "uniplus"
+            pdv_lan_url = (request.form.get("pdv_lan_url") or "").strip()
+            pdv_lan_email = (request.form.get("pdv_lan_email") or "").strip()
+            pdv_lan_password = (request.form.get("pdv_lan_password") or "").strip()
+            if erp_target == "maisgestao":
+                from maisgestao_handler import validate_maisgestao_connection
+
+                db.set_config("erp_target", erp_target)
+                db.set_config("pdv_lan_url", pdv_lan_url or "http://127.0.0.1:5050")
+                db.set_config("pdv_lan_email", pdv_lan_email)
+                if pdv_lan_password:
+                    db.set_config("pdv_lan_password", pdv_lan_password)
+                ok_pdv, pdv_msg = validate_maisgestao_connection(db)
+                if not ok_pdv:
+                    raise ValueError(f"PDV Mais Gestão inválido: {pdv_msg}")
+            else:
+                db.set_config("erp_target", "uniplus")
+                db.set_config("pdv_lan_url", pdv_lan_url)
+                db.set_config("pdv_lan_email", pdv_lan_email)
+                if pdv_lan_password:
+                    db.set_config("pdv_lan_password", pdv_lan_password)
 
             ws_url = request.form.get("ws_url", "").strip()
             if ws_url:
