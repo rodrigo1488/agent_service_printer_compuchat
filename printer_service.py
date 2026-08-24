@@ -253,17 +253,37 @@ def _wrap_text_by_words(text: str, max_width: int) -> list:
     current = []
     current_len = 0
     for w in words:
-        need = len(w) + (1 if current else 0)
-        if current and current_len + need > max_width:
-            lines.append(" ".join(current))
-            current = [w]
-            current_len = len(w)
-        else:
-            current.append(w)
-            current_len = current_len + need if current_len else len(w)
+        chunks = [w[i:i + max_width] for i in range(0, len(w), max_width)] if len(w) > max_width else [w]
+        for chunk in chunks:
+            need = len(chunk) + (1 if current else 0)
+            if current and current_len + need > max_width:
+                lines.append(" ".join(current))
+                current = [chunk]
+                current_len = len(chunk)
+            else:
+                current.append(chunk)
+                current_len = current_len + need if current_len else len(chunk)
     if current:
         lines.append(" ".join(current))
     return lines
+
+
+# Prefixo interno: a linha sai em negrito (ESC E) na montagem ESC/POS.
+_BOLD_MARK = "\x01"
+
+
+def _bold(text: str) -> str:
+    return _BOLD_MARK + (text or "")
+
+
+def _append_wrapped_with_price(lines, label, right_part, left_width, total_width, bold=False):
+    """Primeira linha: texto + preço; demais linhas: só o resto do texto."""
+    left_width = max(int(left_width or 0), 1)
+    wrapped = _wrap_text_by_words(label, left_width) or [""]
+    first = wrapped[0].ljust(left_width) + right_part
+    lines.append(_bold(first[:total_width]) if bold else first[:total_width])
+    for extra in wrapped[1:]:
+        lines.append(_bold(extra[:total_width]) if bold else extra[:total_width])
 
 
 def _escpos_qr_bytes(url: str, module_size=None) -> bytes:
@@ -398,7 +418,7 @@ class PrinterService:
 
         # Dados do cliente
         lines.append("CLIENTE:")
-        lines.append(f" {receipt['customer']['name'][:W-2]}")
+        lines.append(_bold(f" {receipt['customer']['name'][:W-2]}"))
         if receipt['customer']['phone']:
             lines.append(f" Tel: {receipt['customer']['phone'][:W-6]}")
         if receipt['customer']['email']:
@@ -412,7 +432,7 @@ class PrinterService:
         lines.append("-" * W)
         lines.append("")
 
-        # Itens agrupados por grupo (nome em uma linha; só qty e total, sem preço unitário)
+        # Itens agrupados por grupo (nome quebra de linha; qty e total na primeira linha)
         name_width = max(W - 14, 12)  # espaço à direita para "  Nx R$ XX,XX"
         for grupo, items in receipt['items_by_group'].items():
             lines.append(f"* {grupo.upper()[:W-4]} *")
@@ -425,7 +445,6 @@ class PrinterService:
                 # Meio a meio: título curto; sabores em linhas próprias (evita corte "..")
                 if is_half and not name.upper().startswith("MEIO A MEIO"):
                     name = "MEIO A MEIO"
-                name_one_line = (name[: name_width - 2] + "..") if len(name) > name_width else name
                 qty = item.get('quantity', 1) or 1
                 addons = item.get('addons') or []
                 # Valor unitário "seco" do produto (sem adicionais)
@@ -437,13 +456,12 @@ class PrinterService:
                 right_part = f" {qty}x {total_str}"
                 if len(right_part) <= 14:
                     right_part = right_part.rjust(14)
-                line = (name_one_line[:name_width].ljust(name_width)) + right_part
-                lines.append(line[:W])
+                _append_wrapped_with_price(lines, name, right_part, name_width, W, bold=True)
                 # Metades do meio a meio (ex.: 1/2 PIZZA DE PRESUNTO)
                 for half_name in half_lines:
                     half_text = f"  {str(half_name).strip()}"
                     for wrap_line in _wrap_text_by_words(half_text, W) or [half_text[:W]]:
-                        lines.append(wrap_line[:W])
+                        lines.append(_bold(wrap_line[:W]))
                 # Integrantes do combo
                 for ci in item.get('combo_items') or []:
                     ci_name = (ci.get('name') or 'Item').strip()
@@ -451,15 +469,13 @@ class PrinterService:
                     ci_val = float(ci.get('value') or 0)
                     ci_label = f"  > {ci_qty}x {ci_name}" if ci_qty > 1 else f"  > {ci_name}"
                     ci_str = f" R$ {ci_val:.2f}".replace(".", ",")
-                    ci_one = ci_label[:W - len(ci_str)].ljust(W - len(ci_str)) + ci_str
-                    lines.append(ci_one[:W])
+                    _append_wrapped_with_price(lines, ci_label, ci_str, W - len(ci_str), W, bold=True)
                 # Adicionais com valor
                 for addon in addons:
                     addon_label = (addon.get('label') or 'Adicional').strip()
                     addon_val = float(addon.get('value', 0) or 0)
                     addon_str = f" R$ {addon_val:.2f}".replace(".", ",")
-                    addon_one = ("  + " + addon_label)[:W - len(addon_str)].ljust(W - len(addon_str)) + addon_str
-                    lines.append(addon_one[:W])
+                    _append_wrapped_with_price(lines, "  + " + addon_label, addon_str, W - len(addon_str), W, bold=True)
                 # Observação do cliente (quebra em múltiplas linhas se necessário)
                 obs = (item.get('observation') or '').strip()
                 if obs:
@@ -565,12 +581,23 @@ class PrinterService:
         return b'\x1B\x74\x10', 'utf-8'
     
     def _encode_text_with_fallback(self, text: str) -> bytes:
-        """Codifica texto com fallback automático de encoding."""
+        """Codifica texto com fallback; linhas com _BOLD_MARK saem em negrito ESC/POS."""
         _, preferred_encoding = self._get_esc_pos_encoding()
-        text_bytes, used_encoding = EncodingFallback.encode_with_fallback(text, preferred_encoding)
-        if used_encoding != preferred_encoding:
-            print(f"[WARN] Encoding {preferred_encoding} falhou, usando {used_encoding} como fallback")
-        return text_bytes
+        chunks = []
+        warned = False
+        for line in (text or "").split("\n"):
+            bold = line.startswith(_BOLD_MARK)
+            if bold:
+                line = line[1:]
+            line_bytes, used_encoding = EncodingFallback.encode_with_fallback(line, preferred_encoding)
+            if used_encoding != preferred_encoding and not warned:
+                print(f"[WARN] Encoding {preferred_encoding} falhou, usando {used_encoding} como fallback")
+                warned = True
+            if bold:
+                chunks.append(b"\x1B\x45\x01" + line_bytes + b"\x1B\x45\x00")
+            else:
+                chunks.append(line_bytes)
+        return b"\n".join(chunks)
 
     def _printer_key(self):
         return _printer_key(

@@ -93,29 +93,35 @@ def _build_uniplus_items(menu_items: List[Dict[str, Any]], protocol: str) -> Lis
             )
         unit = float(item.get("productValue") or (product or {}).get("value") or 0)
         addons = item.get("addons") or []
-        addons_total = 0.0
         addon_obs = []
+        embedded = 0.0
         for addon in addons:
             if not isinstance(addon, dict):
                 continue
             aval = float(addon.get("value") or 0)
-            addons_total += aval
+            aqty = max(1.0, float(addon.get("quantity") or 1))
+            addon_unit = aval * aqty
             addon_obs.append(addon.get("label") or "Adicional")
-            acodigo = str(addon.get("idUniplus") or _addon_codigo(addon.get("addOnItemId")))
+            acodigo = str(
+                addon.get("idUniplus")
+                or _addon_codigo(addon.get("addOnItemId") or addon.get("addonItemId"))
+            ).strip()
             if acodigo:
                 itens.append(
                     {
                         "codigoproduto": acodigo[:20],
                         "nomeproduto": str(addon.get("label") or "Adicional")[:120],
                         "quantidade": qty,
-                        "precounitario": aval,
-                        "valortotal": round(aval * qty, 2),
+                        "precounitario": addon_unit,
+                        "valortotal": round(addon_unit * qty, 2),
                         "unidademedida": "UN",
                         "observacao": f"Adicional de {nome}"[:255],
                         "orderidintegracao": protocol,
                         "hash": str(uuid.uuid4()),
                     }
                 )
+            else:
+                embedded += addon_unit
         obs_parts = []
         if item.get("type") == "halfAndHalf":
             h1 = item.get("half1Name") or item.get("half1ProductId")
@@ -126,13 +132,14 @@ def _build_uniplus_items(menu_items: List[Dict[str, Any]], protocol: str) -> Lis
         user_obs = _user_observation(item)
         if user_obs:
             obs_parts.append(user_obs)
+        pizza_unit = unit + embedded
         itens.append(
             {
                 "codigoproduto": (codigo or "")[:20],
                 "nomeproduto": nome,
                 "quantidade": qty,
-                "precounitario": unit,
-                "valortotal": round(unit * qty, 2),
+                "precounitario": pizza_unit,
+                "valortotal": round(pizza_unit * qty, 2),
                 "unidademedida": "UN",
                 "observacao": " | ".join(obs_parts)[:255],
                 "orderidintegracao": protocol,

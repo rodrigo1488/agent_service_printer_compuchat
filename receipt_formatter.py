@@ -147,9 +147,6 @@ def format_order_receipt(data: dict) -> dict:
             continue
         base_value = float(item.get("productValue") or item.get("product_value") or 0)
         addons_total = float(item.get("addonsTotal") or item.get("addons_total") or 0)
-        value = base_value + addons_total
-        item_total = quantity * value
-        total += item_total
 
         grupo = item.get("grupo") or "Outros"
         if grupo not in items_by_group:
@@ -157,12 +154,20 @@ def format_order_receipt(data: dict) -> dict:
 
         addons_raw = item.get("addons") or []
         addons_list = []
+        addons_from_list = 0.0
         for a in addons_raw if isinstance(addons_raw, list) else []:
             if not isinstance(a, dict):
                 continue
             label = a.get("label") or "Adicional"
             addon_val = float(a.get("value", 0) or 0)
+            addon_qty = max(1, int(a.get("quantity") or 1))
+            addons_from_list += addon_val * addon_qty
             addons_list.append({"label": str(label), "value": addon_val})
+        if addons_total <= 0:
+            addons_total = addons_from_list
+        value = base_value + addons_total
+        item_total = quantity * value
+        total += item_total
 
         combo_raw = item.get("comboItems") or item.get("combo_items") or []
         combo_list = []
