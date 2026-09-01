@@ -542,12 +542,16 @@ def _friendly_error(exc: Exception, parents) -> str:
 
 @app.route("/products")
 def products_page():
-    """Lista produtos UniPlus com status de vínculo e agrupamento por produto pai."""
+    """Lista produtos ERP (UniPlus ou PDV) com status de vínculo e agrupamento por produto pai."""
     import product_sync
+    from maisgestao_handler import get_erp_target
 
     q = (request.args.get("q") or "").strip()
     message = request.args.get("message")
     message_type = request.args.get("message_type", "success")
+    erp_target = get_erp_target(db)
+    erp_label = "PDV Mais Gestão" if erp_target == "maisgestao" else "UniPlus"
+    source_enabled = product_sync.is_product_sync_source_enabled()
     uniplus_on = (db.get_config("uniplus_enabled") or "false").lower() in (
         "true",
         "1",
@@ -569,9 +573,9 @@ def products_page():
     enabled_map = {p["codigo"]: p for p in db.list_sync_products()}
     enabled_count = sum(1 for p in enabled_map.values() if p.get("enabled"))
     list_error = None
-    if uniplus_on:
+    if source_enabled:
         try:
-            products = product_sync.list_uniplus_products(q=q, limit=2000)
+            products = product_sync.list_erp_products(q=q, limit=2000)
             for p in products:
                 local = enabled_map.get(p["codigo"]) or {}
                 p["sync_enabled"] = bool(local.get("enabled"))
@@ -582,7 +586,7 @@ def products_page():
                 )
         except Exception as e:
             list_error = str(e)
-            message = f"Erro ao listar produtos UniPlus: {e}"
+            message = f"Erro ao listar produtos {erp_label}: {e}"
             message_type = "error"
         try:
             catalog = product_sync.list_compuchat_catalog(limit=1000)
@@ -624,6 +628,9 @@ def products_page():
         enabled_count=enabled_count,
         q=q,
         uniplus_enabled=uniplus_on,
+        erp_target=erp_target,
+        erp_label=erp_label,
+        source_enabled=source_enabled,
         message=message,
         message_type=message_type,
         list_error=list_error,

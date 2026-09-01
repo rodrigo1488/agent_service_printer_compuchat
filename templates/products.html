@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}Produtos UniPlus — Print Agent{% endblock %}
+{% block title %}Produtos {{ erp_label|default('UniPlus') }} — Print Agent{% endblock %}
 {% block extra_css %}
 <style>
     dialog#linkModal {
@@ -194,20 +194,29 @@
 {% endmacro %}
 
 <div class="panel">
-    <h2 class="page-title">Produtos UniPlus</h2>
+    <h2 class="page-title">Produtos {{ erp_label|default('UniPlus') }}</h2>
     <p class="page-sub">
         Códigos <strong>pendentes</strong> ainda não têm nenhum produto Compuchat associado — clique em
         <strong>Vincular…</strong> pra ligar como produto avulso ou variação de um produto pai. Códigos
         <strong>já vinculados</strong> aparecem agrupados por produto Compuchat (evita duplicar o mesmo produto em
         duas linhas).
+        {% if erp_target == 'maisgestao' %}
+        O código enviado ao Compuchat usa <strong>EAN</strong> ou <strong>PLU</strong> do PDV (não o UUID interno).
+        {% endif %}
     </p>
 
     {% if message %}
     <div class="alert alert-{{ message_type or 'success' }}">{{ message }}</div>
     {% endif %}
 
-    {% if not uniplus_enabled %}
-    <div class="alert alert-error">Ative o UniPlus em Configuração → UniPlus para listar produtos.</div>
+    {% if not source_enabled %}
+    <div class="alert alert-error">
+        {% if erp_target == 'maisgestao' %}
+        Configure <strong>erp_target = Mais Gestão</strong> e a URL LAN do PDV em Configuração → UniPlus/ERP.
+        {% else %}
+        Ative o UniPlus em Configuração → UniPlus para listar produtos.
+        {% endif %}
+    </div>
     {% else %}
 
     <form method="get" action="{{ url_for('products_page') }}" style="display:flex; gap:0.6rem; margin-bottom:0.75rem; flex-wrap:wrap;">
@@ -386,8 +395,13 @@
         {% if list_error %}<br><span style="color:var(--danger);">{{ list_error }}</span>{% endif %}
     </p>
     <p class="hint">
+        {% if erp_target == 'maisgestao' %}
+        Produtos vêm do catálogo local do PDV (<code>GET /pos/pdv/catalogo</code>). Confira se a LAN está habilitada,
+        o caixa aberto e se os produtos têm EAN ou código PLU preenchido (UUID não é enviado ao Compuchat).
+        {% else %}
         Se aparecer só 1 item, confira em Configuração → UniPlus se a tabela/DSN apontam para o banco correto
         (<code>produto</code>) e se o Postgres UniPlus está acessível nesta máquina.
+        {% endif %}
     </p>
     {% endif %}
 </div>

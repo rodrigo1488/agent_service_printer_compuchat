@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import urllib.error
 import urllib.request
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 
 class MaisGestaoPermanentError(Exception):
@@ -206,3 +206,105 @@ def format_maisgestao_log_message(result: Dict[str, Any]) -> str:
         f"MaisGestão {result.get('action')} conta={result.get('conta_id')} "
         f"protocol={result.get('protocol')} itens={result.get('itens_count')}"
     )
+
+
+CODIGO_COMPUCHAT_MAX = 20
+
+
+def codigo_compuchat_from_pdv_produto(produto: Dict[str, Any]) -> Optional[str]:
+    ean = str(produto.get("ean") or "").strip()
+    if ean and len(ean) <= CODIGO_COMPUCHAT_MAX:
+        return ean
+    raw = produto.get("codigo")
+    if raw is not None and str(raw).strip() != "":
+        try:
+            if isinstance(raw, float):
+                codigo = str(int(raw)) if raw == int(raw) else str(raw).strip()
+            else:
+                codigo = (
+                    str(int(raw))
+                    if str(raw).strip().isdigit()
+                    else str(raw).strip()
+                )
+        except (TypeError, ValueError):
+            codigo = str(raw).strip()
+        if codigo and len(codigo) <= CODIGO_COMPUCHAT_MAX and not codigo.startswith("?"):
+            return codigo
+    return None
+
+
+def fetch_pdv_catalog(db_module) -> Dict[str, Any]:
+    if not is_maisgestao_enabled(db_module):
+        raise MaisGestaoPermanentError(
+            "ERR_PDV_CONFIG: configure erp_target=maisgestao e pdv_lan_url"
+        )
+    token = login_pdv(db_module)
+    cfg = _pdv_config(db_module)
+    url = f"{cfg['base_url']}/pos/pdv/catalogo"
+    status, body = _http_json("GET", url, token=token, timeout=60.0)
+    if status == 401:
+        try:
+            db_module.set_config("pdv_lan_token", "")
+        except Exception:
+            pass
+        token = login_pdv(db_module)
+        status, body = _http_json("GET", url, token=token, timeout=60.0)
+    if status >= 500:
+        msg = body.get("error") if isinstance(body, dict) else str(body)
+        raise MaisGestaoOperationalError(f"ERR_PDV_CATALOGO: {msg}")
+    if status >= 400:
+        msg = body.get("error") if isinstance(body, dict) else str(body)
+        raise MaisGestaoPermanentError(f"ERR_PDV_CATALOGO: {msg}")
+    return body if isinstance(body, dict) else {}
+
+
+def list_pdv_products(
+    db_module, q: str = "", limit: int = 500
+) -> List[Dict[str, Any]]:
+    catalog = fetch_pdv_catalog(db_module)
+    produtos = catalog.get("produtos") or []
+    q_norm = (q or "").strip().lower()
+    limit = max(1, min(int(limit or 500), 5000))
+    out: List[Dict[str, Any]] = []
+    for raw in produtos:
+        if not isinstance(raw, dict):
+            continue
+        codigo = codigo_compuchat_from_pdv_produto(raw)
+        if not codigo:
+            continue
+        nome = str(raw.get("descricao") or "").strip()
+        try:
+            preco = float(raw.get("preco") or 0)
+        except (TypeError, ValueError):
+            preco = 0.0
+        atualizado = raw.get("atualizadoem") or catalog.get("atualizadoem")
+        row = {
+            "codigo": codigo,
+            "nome": nome,
+            "preco": preco,
+            "dataalteracao": atualizado,
+            "inativo": 0,
+            "id_pdv": str(raw.get("id") or "").strip() or None,
+            "ean": str(raw.get("ean") or "").strip() or None,
+            "codigo_interno": raw.get("codigo"),
+            "fingerprint": f"{nome}|{preco:.4f}|{atualizado or ''}",
+        }
+        if q_norm:
+            hay = f"{codigo} {nome} {row.get('ean') or ''} {row.get('id_pdv') or ''}".lower()
+            if q_norm not in hay:
+                continue
+        out.append(row)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def fetch_pdv_product(db_module, codigo: str) -> Optional[Dict[str, Any]]:
+    codigo = str(codigo or "").strip()
+    if not codigo:
+        return None
+    for p in list_pdv_products(db_module, q=codigo, limit=5000):
+        if str(p.get("codigo") or "").strip() == codigo:
+            return p
+    return None
+

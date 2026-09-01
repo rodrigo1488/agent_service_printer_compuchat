@@ -13,6 +13,12 @@ import urllib.request
 from typing import Any, Dict, List, Optional, Tuple
 
 import db
+from maisgestao_handler import (
+    fetch_pdv_product,
+    get_erp_target,
+    is_maisgestao_enabled,
+    list_pdv_products,
+)
 from uniplus_handler import (
     _safe_ident,
     is_uniplus_enabled,
@@ -95,6 +101,30 @@ def make_fingerprint(nome: str, preco: float, dataalteracao: Any = None) -> str:
     if dataalteracao is not None:
         da = str(dataalteracao)
     return f"{nome}|{float(preco):.4f}|{da}"
+
+
+def erp_source_label(db_module=None) -> str:
+    mod = db_module or db
+    return "PDV Mais Gestão" if get_erp_target(mod) == "maisgestao" else "UniPlus"
+
+
+def is_product_sync_source_enabled(db_module=None) -> bool:
+    mod = db_module or db
+    if get_erp_target(mod) == "maisgestao":
+        return is_maisgestao_enabled(mod)
+    return is_uniplus_enabled(mod)
+
+
+def list_erp_products(q: str = "", limit: int = 500) -> List[Dict[str, Any]]:
+    if get_erp_target(db) == "maisgestao":
+        return list_pdv_products(db, q=q, limit=limit)
+    return list_uniplus_products(q=q, limit=limit)
+
+
+def fetch_erp_product(codigo: str) -> Optional[Dict[str, Any]]:
+    if get_erp_target(db) == "maisgestao":
+        return fetch_pdv_product(db, codigo)
+    return fetch_uniplus_product(codigo)
 
 
 def list_uniplus_products(q: str = "", limit: int = 500) -> List[Dict[str, Any]]:
@@ -884,9 +914,9 @@ def upsert_many(products: List[Dict[str, Any]]) -> Dict[str, Any]:
 
 def enable_all_products(q: str = "", limit: int = 2000) -> Dict[str, Any]:
     """Marca sync ON em todos os produtos listados (filtro q) e faz upsert imediato."""
-    if not is_uniplus_enabled(db):
-        raise RuntimeError("UniPlus desativado na configuração")
-    products = list_uniplus_products(q=q, limit=limit)
+    if not is_product_sync_source_enabled():
+        raise RuntimeError(f"{erp_source_label()} desativado na configuração")
+    products = list_erp_products(q=q, limit=limit)
     # Sync exige código válido (não placeholders)
     products = [
         p
@@ -921,10 +951,11 @@ def enable_all_products(q: str = "", limit: int = 2000) -> Dict[str, Any]:
 def sync_all_products(q: str = "", limit: int = 2000) -> Dict[str, Any]:
     """
     Força sync de todos os produtos com sync automático ON.
-    Se q for informado, restringe aos códigos que batem com a busca UniPlus atual.
+    Se q for informado, restringe aos códigos que batem com a busca ERP atual.
     """
-    if not is_uniplus_enabled(db):
-        raise RuntimeError("UniPlus desativado na configuração")
+    if not is_product_sync_source_enabled():
+        raise RuntimeError(f"{erp_source_label()} desativado na configuração")
+    source = erp_source_label()
 
     enabled = db.list_sync_products(enabled_only=True)
     if not enabled:
@@ -940,7 +971,7 @@ def sync_all_products(q: str = "", limit: int = 2000) -> Dict[str, Any]:
     if q:
         listed = {
             str(p.get("codigo") or "").strip()
-            for p in list_uniplus_products(q=q, limit=limit)
+            for p in list_erp_products(q=q, limit=limit)
         }
         enabled = [item for item in enabled if item["codigo"] in listed]
 
@@ -958,11 +989,11 @@ def sync_all_products(q: str = "", limit: int = 2000) -> Dict[str, Any]:
     missing = 0
     for item in enabled:
         codigo = item["codigo"]
-        remote = fetch_uniplus_product(codigo)
+        remote = fetch_erp_product(codigo)
         if not remote:
             missing += 1
             db.update_sync_product_state(
-                codigo, last_error="produto não encontrado no UniPlus"
+                codigo, last_error=f"produto não encontrado no {source}"
             )
             continue
         remotes.append(remote)
@@ -973,7 +1004,7 @@ def sync_all_products(q: str = "", limit: int = 2000) -> Dict[str, Any]:
     result["missing"] = missing
     if missing and len(result.get("errors") or []) < 5:
         result.setdefault("errors", []).append(
-            f"{missing} produto(s) não encontrado(s) no UniPlus"
+            f"{missing} produto(s) não encontrado(s) no {source}"
         )
     result["ok"] = int(result.get("failed") or 0) == 0
     return result
@@ -985,9 +1016,10 @@ def sync_one(codigo: str, force: bool = False) -> Dict[str, Any]:
     if not local or (not local.get("enabled") and not force):
         return {"ok": False, "error": "produto não está em sync automático"}
 
-    remote = fetch_uniplus_product(codigo)
+    source = erp_source_label()
+    remote = fetch_erp_product(codigo)
     if not remote:
-        err = "produto não encontrado no UniPlus"
+        err = f"produto não encontrado no {source}"
         db.update_sync_product_state(codigo, last_error=err)
         return {"ok": False, "error": err}
 
@@ -1024,7 +1056,7 @@ def sync_one(codigo: str, force: bool = False) -> Dict[str, Any]:
 
 
 def enable_product(codigo: str, enabled: bool = True) -> Dict[str, Any]:
-    remote = fetch_uniplus_product(codigo) if enabled else None
+    remote = fetch_erp_product(codigo) if enabled else None
     nome = (remote or {}).get("nome") or ""
     preco = float((remote or {}).get("preco") or 0)
     db.set_sync_product_enabled(codigo, enabled, nome=nome, preco=preco)
@@ -1036,8 +1068,9 @@ def enable_product(codigo: str, enabled: bool = True) -> Dict[str, Any]:
 
 def poll_once() -> int:
     """Sincroniza produtos enabled com fingerprint alterado. Retorna qtd enviada."""
-    if not is_uniplus_enabled(db):
+    if not is_product_sync_source_enabled():
         return 0
+    source = erp_source_label()
     enabled = db.list_sync_products(enabled_only=True)
     if not enabled:
         return 0
@@ -1045,10 +1078,10 @@ def poll_once() -> int:
     for item in enabled:
         codigo = item["codigo"]
         try:
-            remote = fetch_uniplus_product(codigo)
+            remote = fetch_erp_product(codigo)
             if not remote:
                 db.update_sync_product_state(
-                    codigo, last_error="produto não encontrado no UniPlus"
+                    codigo, last_error=f"produto não encontrado no {source}"
                 )
                 continue
             if item.get("fingerprint") == remote["fingerprint"] and not item.get(
@@ -1089,9 +1122,9 @@ def _poll_loop():
 
 
 def is_product_sync_poll_enabled() -> bool:
-    """Poll contínuo fica OFF por padrão — Unico reclama de conexão concorrente no Postgres."""
+    """Poll contínuo: UniPlus OFF por padrão (Postgres); PDV pode usar o mesmo flag."""
     raw = (db.get_config("uniplus_product_sync_poll") or "false").lower()
-    return raw in ("true", "1", "yes", "on") and is_uniplus_enabled(db)
+    return raw in ("true", "1", "yes", "on") and is_product_sync_source_enabled()
 
 
 def start_product_sync_thread() -> None:

@@ -26,14 +26,15 @@ if errorlevel 1 (
 )
 
 echo [2/4] Verificando PyInstaller...
-pyinstaller --version
+python -m PyInstaller --version
 if errorlevel 1 (
   echo PyInstaller nao encontrado apos instalacao.
+  echo Tente: python -m pip install --user pyinstaller
   exit /b 1
 )
 
 echo [3/4] Gerando executavel com PrintAgent.spec...
-pyinstaller --noconfirm PrintAgent.spec
+python -m PyInstaller --noconfirm PrintAgent.spec
 if errorlevel 1 (
   echo Build falhou.
   exit /b 1
