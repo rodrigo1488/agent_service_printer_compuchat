@@ -3,9 +3,14 @@
 from __future__ import annotations
 
 import json
+import time
 import urllib.error
 import urllib.request
 from typing import Any, Dict, List, Optional, Tuple
+
+PDV_CATALOG_CACHE_TTL_SEC = 8.0
+_pdv_catalog_cache: Dict[str, Any] = {"at": 0.0, "data": None}
+CODIGO_COMPUCHAT_MAX = 20
 
 
 class MaisGestaoPermanentError(Exception):
@@ -208,103 +213,168 @@ def format_maisgestao_log_message(result: Dict[str, Any]) -> str:
     )
 
 
-CODIGO_COMPUCHAT_MAX = 20
+def _codigo_inteiro(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    raw = str(value).strip()
+    if not raw or raw.lower() in ("none", "null"):
+        return None
+    try:
+        numero = int(float(raw))
+    except (TypeError, ValueError):
+        return None
+    if numero <= 0:
+        return None
+    return str(numero)
 
 
-def codigo_compuchat_from_pdv_produto(produto: Dict[str, Any]) -> Optional[str]:
+def codigo_from_pdv_product(produto: Dict[str, Any]) -> Optional[str]:
+    """Código enviado ao Compuchat (idUniplus, máx. 20). Prefere codigo interno; senão EAN.
+
+    UUID do produto não cabe em idUniplus (STRING 20) e é ignorado.
+    """
+    codigo = _codigo_inteiro(produto.get("codigo"))
+    if codigo and len(codigo) <= CODIGO_COMPUCHAT_MAX:
+        return codigo
     ean = str(produto.get("ean") or "").strip()
     if ean and len(ean) <= CODIGO_COMPUCHAT_MAX:
         return ean
-    raw = produto.get("codigo")
-    if raw is not None and str(raw).strip() != "":
-        try:
-            if isinstance(raw, float):
-                codigo = str(int(raw)) if raw == int(raw) else str(raw).strip()
-            else:
-                codigo = (
-                    str(int(raw))
-                    if str(raw).strip().isdigit()
-                    else str(raw).strip()
-                )
-        except (TypeError, ValueError):
-            codigo = str(raw).strip()
-        if codigo and len(codigo) <= CODIGO_COMPUCHAT_MAX and not codigo.startswith("?"):
-            return codigo
     return None
 
 
-def fetch_pdv_catalog(db_module) -> Dict[str, Any]:
+codigo_compuchat_from_pdv_produto = codigo_from_pdv_product
+
+
+def map_pdv_catalog_products(
+    catalog: Dict[str, Any],
+    *,
+    q: str = "",
+    limit: int = 2000,
+) -> List[Dict[str, Any]]:
+    """Traduz GET /pos/pdv/catalogo → itens no formato do product_sync."""
+    grupos = {
+        str(g.get("id") or ""): str(g.get("nome") or "").strip()
+        for g in (catalog.get("grupos") or [])
+        if g.get("id")
+    }
+    grupos_gourmet = {
+        str(g.get("id") or ""): str(g.get("nome") or "").strip()
+        for g in (catalog.get("gruposGourmet") or [])
+        if g.get("id")
+    }
+    needle = (q or "").strip().lower()
+    limit = max(1, min(int(limit or 2000), 5000))
+    out: List[Dict[str, Any]] = []
+    for raw in catalog.get("produtos") or []:
+        if not isinstance(raw, dict):
+            continue
+        codigo = codigo_from_pdv_product(raw)
+        if not codigo:
+            continue
+        nome = str(raw.get("descricao") or "").strip() or codigo
+        try:
+            preco = float(raw.get("preco") or 0)
+        except (TypeError, ValueError):
+            preco = 0.0
+        grupo = (
+            grupos_gourmet.get(str(raw.get("idgrupogourmet") or ""))
+            or grupos.get(str(raw.get("idgrupo") or ""))
+            or ""
+        )
+        if needle and needle not in codigo.lower() and needle not in nome.lower():
+            continue
+        out.append(
+            {
+                "codigo": codigo,
+                "nome": nome,
+                "preco": preco,
+                "grupo": grupo,
+                "ean": str(raw.get("ean") or "").strip() or None,
+                "idproduto": str(raw.get("id") or "").strip() or None,
+                "inativo": 0,
+                "dataalteracao": raw.get("atualizadoem") or catalog.get("atualizadoem"),
+                "fingerprint": f"{nome}|{preco:.4f}|{grupo}",
+            }
+        )
+        if len(out) >= limit:
+            break
+    return out
+
+
+def clear_pdv_catalog_cache() -> None:
+    _pdv_catalog_cache["at"] = 0.0
+    _pdv_catalog_cache["data"] = None
+
+
+def fetch_pdv_catalog(db_module, *, force: bool = False) -> Dict[str, Any]:
+    """GET /pos/pdv/catalogo autenticado. Cache curto para a tela de produtos."""
     if not is_maisgestao_enabled(db_module):
         raise MaisGestaoPermanentError(
-            "ERR_PDV_CONFIG: configure erp_target=maisgestao e pdv_lan_url"
+            "ERR_PDV_CONFIG: erp_target=maisgestao e pdv_lan_url obrigatórios"
         )
+    now = time.monotonic()
+    cached = _pdv_catalog_cache.get("data")
+    if (
+        not force
+        and isinstance(cached, dict)
+        and now - float(_pdv_catalog_cache.get("at") or 0) < PDV_CATALOG_CACHE_TTL_SEC
+    ):
+        return cached
+
     token = login_pdv(db_module)
     cfg = _pdv_config(db_module)
     url = f"{cfg['base_url']}/pos/pdv/catalogo"
-    status, body = _http_json("GET", url, token=token, timeout=60.0)
+    status, body = _http_json("GET", url, token=token, timeout=45.0)
     if status == 401:
         try:
             db_module.set_config("pdv_lan_token", "")
         except Exception:
             pass
         token = login_pdv(db_module)
-        status, body = _http_json("GET", url, token=token, timeout=60.0)
+        status, body = _http_json("GET", url, token=token, timeout=45.0)
     if status >= 500:
         msg = body.get("error") if isinstance(body, dict) else str(body)
-        raise MaisGestaoOperationalError(f"ERR_PDV_CATALOGO: {msg}")
+        raise MaisGestaoOperationalError(f"ERR_PDV_CATALOG: {msg}")
     if status >= 400:
         msg = body.get("error") if isinstance(body, dict) else str(body)
-        raise MaisGestaoPermanentError(f"ERR_PDV_CATALOGO: {msg}")
-    return body if isinstance(body, dict) else {}
+        raise MaisGestaoPermanentError(f"ERR_PDV_CATALOG: {msg}")
+    if not isinstance(body, dict):
+        raise MaisGestaoPermanentError("ERR_PDV_CATALOG: resposta inválida")
+    _pdv_catalog_cache["at"] = now
+    _pdv_catalog_cache["data"] = body
+    try:
+        db_module.set_config("maisgestao_last_error", "")
+    except Exception:
+        pass
+    return body
 
 
-def list_pdv_products(
-    db_module, q: str = "", limit: int = 500
+def list_maisgestao_products(
+    db_module, q: str = "", limit: int = 2000, *, force_refresh: bool = False
 ) -> List[Dict[str, Any]]:
-    catalog = fetch_pdv_catalog(db_module)
-    produtos = catalog.get("produtos") or []
-    q_norm = (q or "").strip().lower()
-    limit = max(1, min(int(limit or 500), 5000))
-    out: List[Dict[str, Any]] = []
-    for raw in produtos:
-        if not isinstance(raw, dict):
-            continue
-        codigo = codigo_compuchat_from_pdv_produto(raw)
-        if not codigo:
-            continue
-        nome = str(raw.get("descricao") or "").strip()
-        try:
-            preco = float(raw.get("preco") or 0)
-        except (TypeError, ValueError):
-            preco = 0.0
-        atualizado = raw.get("atualizadoem") or catalog.get("atualizadoem")
-        row = {
-            "codigo": codigo,
-            "nome": nome,
-            "preco": preco,
-            "dataalteracao": atualizado,
-            "inativo": 0,
-            "id_pdv": str(raw.get("id") or "").strip() or None,
-            "ean": str(raw.get("ean") or "").strip() or None,
-            "codigo_interno": raw.get("codigo"),
-            "fingerprint": f"{nome}|{preco:.4f}|{atualizado or ''}",
-        }
-        if q_norm:
-            hay = f"{codigo} {nome} {row.get('ean') or ''} {row.get('id_pdv') or ''}".lower()
-            if q_norm not in hay:
-                continue
-        out.append(row)
-        if len(out) >= limit:
-            break
-    return out
+    if not is_maisgestao_enabled(db_module):
+        return []
+    catalog = fetch_pdv_catalog(db_module, force=force_refresh)
+    return map_pdv_catalog_products(catalog, q=q, limit=limit)
 
 
-def fetch_pdv_product(db_module, codigo: str) -> Optional[Dict[str, Any]]:
+def fetch_maisgestao_product(db_module, codigo: str) -> Optional[Dict[str, Any]]:
     codigo = str(codigo or "").strip()
     if not codigo:
         return None
-    for p in list_pdv_products(db_module, q=codigo, limit=5000):
-        if str(p.get("codigo") or "").strip() == codigo:
-            return p
+    for item in list_maisgestao_products(db_module, limit=5000):
+        if str(item.get("codigo") or "").strip() == codigo:
+            return item
     return None
 
+
+def list_pdv_products(
+    db_module, q: str = "", limit: int = 500, *, force_refresh: bool = False
+) -> List[Dict[str, Any]]:
+    return list_maisgestao_products(
+        db_module, q=q, limit=limit, force_refresh=force_refresh
+    )
+
+
+def fetch_pdv_product(db_module, codigo: str) -> Optional[Dict[str, Any]]:
+    return fetch_maisgestao_product(db_module, codigo)

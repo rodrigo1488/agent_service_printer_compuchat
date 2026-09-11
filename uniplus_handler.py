@@ -750,7 +750,7 @@ def _insert_contamesaitem(
         "valortaxaservico": 0.0,
         "nummaxcombinacao": 0,
         "pauta": 0,
-        "precoalterado": 0,
+        "precoalterado": 1,
         "prontonaop": 0,
         "quantidadeimpressa": 0.0,
         "quantidadepaga": 0.0,

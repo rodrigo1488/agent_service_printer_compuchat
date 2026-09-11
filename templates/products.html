@@ -201,8 +201,9 @@
         <strong>já vinculados</strong> aparecem agrupados por produto Compuchat (evita duplicar o mesmo produto em
         duas linhas).
         {% if erp_target == 'maisgestao' %}
-        O código enviado ao Compuchat usa <strong>EAN</strong> ou <strong>PLU</strong> do PDV (não o UUID interno).
+        O código enviado ao Compuchat usa o <strong>código interno</strong> do PDV ou o <strong>EAN</strong> (não o UUID).
         {% endif %}
+        {% if product_sync_poll %}<br>Sync automático de preço/nome está <strong>ligado</strong>.{% endif %}
     </p>
 
     {% if message %}
@@ -212,7 +213,7 @@
     {% if not source_enabled %}
     <div class="alert alert-error">
         {% if erp_target == 'maisgestao' %}
-        Configure <strong>erp_target = Mais Gestão</strong> e a URL LAN do PDV em Configuração → UniPlus/ERP.
+        Configure o PDV Mais Gestão em Configuração → UniPlus (destino Mais Gestão e URL LAN) para listar produtos.
         {% else %}
         Ative o UniPlus em Configuração → UniPlus para listar produtos.
         {% endif %}
@@ -397,7 +398,7 @@
     <p class="hint">
         {% if erp_target == 'maisgestao' %}
         Produtos vêm do catálogo local do PDV (<code>GET /pos/pdv/catalogo</code>). Confira se a LAN está habilitada,
-        o caixa aberto e se os produtos têm EAN ou código PLU preenchido (UUID não é enviado ao Compuchat).
+        o caixa aberto e se os produtos têm código interno ou EAN (UUID não é enviado ao Compuchat).
         {% else %}
         Se aparecer só 1 item, confira em Configuração → UniPlus se a tabela/DSN apontam para o banco correto
         (<code>produto</code>) e se o Postgres UniPlus está acessível nesta máquina.

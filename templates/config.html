@@ -199,7 +199,7 @@
             <h3 style="margin-bottom: 0.4rem;">ERP destino do delivery</h3>
             <p class="hint" style="margin-bottom: 0.85rem;">
                 O evento <code>uniplus_job</code> do Compuchat é gravado no UniPlus (Postgres) ou no PDV Mais Gestão (LAN API).
-                No cardápio Compuchat, o código do produto deve ser o <strong>EAN</strong> ou o <strong>UUID</strong> do produto no Mais Gestão.
+                No cardápio Compuchat, o código do produto Mais Gestão deve ser o <strong>código interno</strong> (ou o <strong>EAN</strong> se o produto não tiver código). UUID não cabe no campo de 20 caracteres.
             </p>
             <div class="form-group">
                 <label for="erp_target">Destino</label>
@@ -228,6 +228,14 @@
                            placeholder="{% if pdv_lan_password %}•••••• (deixe em branco para manter){% else %}senha{% endif %}">
                 </div>
             </div>
+            <div class="form-group check-row">
+                <input type="checkbox" id="maisgestao_product_sync_poll" name="maisgestao_product_sync_poll" value="on" {% if maisgestao_product_sync_poll %}checked{% endif %}>
+                <label for="maisgestao_product_sync_poll">Sincronizar produtos do PDV automaticamente (a cada 1 min)</label>
+            </div>
+            <p class="hint" style="margin-top:-0.35rem; margin-bottom:0;">
+                Lê o catálogo em <code>GET /pos/pdv/catalogo</code> e envia código + nome + preço + grupo ao Compuchat.
+                Produtos novos entram sozinhos. Desligue o sync de um item na tela Produtos para não reenviar.
+            </p>
         </div>
         <div class="section-card">
             <h3 style="margin-bottom: 0.4rem;">UniPlus Gourmet</h3>

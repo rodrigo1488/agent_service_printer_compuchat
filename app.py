@@ -59,6 +59,9 @@ def _config_context():
     uniplus_product_sync_poll = (db.get_config("uniplus_product_sync_poll") or "false").lower() in (
         "true", "1", "yes", "on"
     )
+    maisgestao_product_sync_poll = (db.get_config("maisgestao_product_sync_poll") or "true").lower() in (
+        "true", "1", "yes", "on"
+    )
     pos_api_token = db.get_config("pos_api_token") or ""
     uniplus_mesa_tipopedido = db.get_config("uniplus_mesa_tipopedido") or "1"
     erp_target = (db.get_config("erp_target") or "uniplus").strip().lower()
@@ -83,6 +86,7 @@ def _config_context():
         "uniplus_contamesa_table": uniplus_contamesa_table,
         "uniplus_contamesaitem_table": uniplus_contamesaitem_table,
         "uniplus_product_sync_poll": uniplus_product_sync_poll,
+        "maisgestao_product_sync_poll": maisgestao_product_sync_poll,
         "pos_api_token": pos_api_token,
         "uniplus_mesa_tipopedido": uniplus_mesa_tipopedido,
         "erp_target": erp_target,
@@ -196,17 +200,28 @@ def _build_health_status():
 
     # UniPlus: NÃO abrir conexão no health (Unico interpreta sessão concorrente).
     from uniplus_handler import is_uniplus_enabled
-    from product_sync import is_product_sync_poll_enabled
+    from product_sync import (
+        is_maisgestao_product_sync_poll_enabled,
+        is_uniplus_product_sync_poll_enabled,
+    )
+    from maisgestao_handler import get_erp_target, is_maisgestao_enabled
 
     uniplus_on = is_uniplus_enabled(db)
     uniplus_info = {
         "enabled": uniplus_on,
         "db_ok": None,
-        "product_sync_poll": is_product_sync_poll_enabled(),
+        "product_sync_poll": is_uniplus_product_sync_poll_enabled(),
         "last_error": db.get_config("uniplus_last_error") or "",
         "note": "conexão sob demanda (jobs/produtos); health não testa o Postgres",
     }
     health_status["uniplus"] = uniplus_info
+    health_status["maisgestao"] = {
+        "enabled": is_maisgestao_enabled(db),
+        "erp_target": get_erp_target(db),
+        "product_sync_poll": is_maisgestao_product_sync_poll_enabled(),
+        "last_error": db.get_config("maisgestao_last_error") or "",
+        "pdv_lan_url": db.get_config("pdv_lan_url") or "",
+    }
 
     if health_status["database"]["status"] != "ok":
         health_status["status"] = "degraded"
@@ -268,13 +283,17 @@ def config():
             pdv_lan_email = (request.form.get("pdv_lan_email") or "").strip()
             pdv_lan_password = (request.form.get("pdv_lan_password") or "").strip()
             if erp_target == "maisgestao":
-                from maisgestao_handler import validate_maisgestao_connection
+                from maisgestao_handler import (
+                    clear_pdv_catalog_cache,
+                    validate_maisgestao_connection,
+                )
 
                 db.set_config("erp_target", erp_target)
                 db.set_config("pdv_lan_url", pdv_lan_url or "http://127.0.0.1:5050")
                 db.set_config("pdv_lan_email", pdv_lan_email)
                 if pdv_lan_password:
                     db.set_config("pdv_lan_password", pdv_lan_password)
+                clear_pdv_catalog_cache()
                 ok_pdv, pdv_msg = validate_maisgestao_connection(db)
                 if not ok_pdv:
                     raise ValueError(f"PDV Mais Gestão inválido: {pdv_msg}")
@@ -292,6 +311,9 @@ def config():
             uniplus_product_sync_poll = request.form.get(
                 "uniplus_product_sync_poll", ""
             ).lower() in ("true", "1", "on", "yes")
+            maisgestao_product_sync_poll = request.form.get(
+                "maisgestao_product_sync_poll", ""
+            ).lower() in ("true", "1", "on", "yes")
 
             db.set_config("uniplus_enabled", "true" if uniplus_enabled else "false")
             db.set_config("uniplus_connection_string", uniplus_dsn)
@@ -303,6 +325,10 @@ def config():
             db.set_config(
                 "uniplus_product_sync_poll",
                 "true" if uniplus_product_sync_poll else "false",
+            )
+            db.set_config(
+                "maisgestao_product_sync_poll",
+                "true" if maisgestao_product_sync_poll else "false",
             )
             try:
                 refresh_product_sync_thread()
@@ -573,12 +599,19 @@ def products_page():
     enabled_map = {p["codigo"]: p for p in db.list_sync_products()}
     enabled_count = sum(1 for p in enabled_map.values() if p.get("enabled"))
     list_error = None
+    auto_new = (
+        erp_target == "maisgestao"
+        and product_sync.is_maisgestao_product_sync_poll_enabled()
+    )
     if source_enabled:
         try:
-            products = product_sync.list_erp_products(q=q, limit=2000)
+            products = product_sync.list_source_products(q=q, limit=2000)
             for p in products:
                 local = enabled_map.get(p["codigo"]) or {}
-                p["sync_enabled"] = bool(local.get("enabled"))
+                if local:
+                    p["sync_enabled"] = bool(local.get("enabled"))
+                else:
+                    p["sync_enabled"] = auto_new
                 p["last_synced_at"] = local.get("last_synced_at")
                 p["last_error"] = local.get("last_error") or ""
                 p["suggested_label"] = product_sync.suggest_option_label(
@@ -628,9 +661,10 @@ def products_page():
         enabled_count=enabled_count,
         q=q,
         uniplus_enabled=uniplus_on,
+        source_enabled=source_enabled,
         erp_target=erp_target,
         erp_label=erp_label,
-        source_enabled=source_enabled,
+        product_sync_poll=product_sync.is_product_sync_poll_enabled(),
         message=message,
         message_type=message_type,
         list_error=list_error,

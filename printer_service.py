@@ -241,6 +241,25 @@ def is_print_draining_for_config(cfg) -> bool:
     return _is_draining_key(svc._printer_key())
 
 
+def _item_dry_unit(item: dict) -> float:
+    """Preço unitário do produto sem adicionais.
+
+    `value` no cupom já é o cheio (produto + adicionais). Usar `value - addons`
+    nesse caso está certo; se `value` vier seco (só o produto), a subtração
+    derruba o preço (85 - 10 = 75). Prefira `base_value` / `productValue`.
+    """
+    if item.get("base_value") is not None:
+        return float(item.get("base_value") or 0)
+    if item.get("productValue") is not None:
+        return float(item.get("productValue") or 0)
+    if item.get("product_value") is not None:
+        return float(item.get("product_value") or 0)
+    addons = item.get("addons") or []
+    addons_sum = sum(float(a.get("value", 0) or 0) for a in addons)
+    unit_full = float(item.get("value", 0) or 0)
+    return unit_full - addons_sum
+
+
 def _wrap_text_by_words(text: str, max_width: int) -> list:
     """Quebra texto por palavras para não cortar no meio; retorna lista de linhas."""
     if not text or max_width <= 0:
@@ -447,10 +466,7 @@ class PrinterService:
                     name = "MEIO A MEIO"
                 qty = item.get('quantity', 1) or 1
                 addons = item.get('addons') or []
-                # Valor unitário "seco" do produto (sem adicionais)
-                unit_full = float(item.get('value', 0) or 0)
-                addons_sum = sum(float(a.get('value', 0) or 0) for a in addons)
-                base_unit = unit_full - addons_sum
+                base_unit = _item_dry_unit(item)
                 total_seco = round(base_unit * qty, 2)
                 total_str = f"R$ {total_seco:.2f}".replace(".", ",")
                 right_part = f" {qty}x {total_str}"

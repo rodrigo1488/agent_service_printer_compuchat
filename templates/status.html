@@ -132,9 +132,29 @@
             <span class="badge badge-muted">Desligado</span>
             {% endif %}
         </dd>
+        <dt>Mais Gestão</dt>
+        <dd>
+            {% if health.maisgestao and health.maisgestao.enabled %}
+            <span class="badge badge-ok">Ativo</span>
+            {% if health.maisgestao.product_sync_poll %}
+            <span class="badge badge-ok">sync produtos ON</span>
+            {% else %}
+            <span class="badge badge-muted">sync produtos OFF</span>
+            {% endif %}
+            {% if health.maisgestao.pdv_lan_url %}
+            <code>{{ health.maisgestao.pdv_lan_url }}</code>
+            {% endif %}
+            {% else %}
+            <span class="badge badge-muted">Desligado</span>
+            {% endif %}
+        </dd>
         {% if health.uniplus and health.uniplus.last_error %}
         <dt>Último erro UniPlus</dt>
         <dd>{{ health.uniplus.last_error }}</dd>
+        {% endif %}
+        {% if health.maisgestao and health.maisgestao.last_error %}
+        <dt>Último erro Mais Gestão</dt>
+        <dd>{{ health.maisgestao.last_error }}</dd>
         {% endif %}
         <dt>Atualizado em</dt>
         <dd>{{ health.timestamp }}</dd>

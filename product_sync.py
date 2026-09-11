@@ -1,4 +1,4 @@
-"""Sync inteligente de produtos UniPlus → Compuchat."""
+"""Sync inteligente de produtos UniPlus/Mais Gestão → Compuchat."""
 from __future__ import annotations
 
 import json
@@ -789,6 +789,42 @@ def distinct_grupos(parents: List[Dict[str, Any]]) -> List[str]:
     return sorted(grupos, key=lambda s: s.lower())
 
 
+def is_maisgestao_source() -> bool:
+    from maisgestao_handler import get_erp_target, is_maisgestao_enabled
+
+    return get_erp_target(db) == "maisgestao" and is_maisgestao_enabled(db)
+
+
+def is_product_source_enabled() -> bool:
+    if is_maisgestao_source():
+        return True
+    return is_uniplus_enabled(db)
+
+
+def source_error_label() -> str:
+    return "Mais Gestão" if is_maisgestao_source() else "UniPlus"
+
+
+def list_source_products(
+    q: str = "", limit: int = 2000, *, force_refresh: bool = False
+) -> List[Dict[str, Any]]:
+    if is_maisgestao_source():
+        from maisgestao_handler import list_maisgestao_products
+
+        return list_maisgestao_products(
+            db, q=q, limit=limit, force_refresh=force_refresh
+        )
+    return list_uniplus_products(q=q, limit=limit)
+
+
+def fetch_source_product(codigo: str) -> Optional[Dict[str, Any]]:
+    if is_maisgestao_source():
+        from maisgestao_handler import fetch_maisgestao_product
+
+        return fetch_maisgestao_product(db, codigo)
+    return fetch_uniplus_product(codigo)
+
+
 def upsert_to_compuchat(
     products: List[Dict[str, Any]], *, timeout: int = 30
 ) -> Dict[str, Any]:
@@ -799,17 +835,21 @@ def upsert_to_compuchat(
     if not base:
         raise RuntimeError("ws_url não configurada")
     url = f"{base}/agent/products/upsert"
-    payload = {
-        "products": [
-            {
-                "codigo": str(p.get("codigo") or "").strip()[:20],
-                "nome": str(p.get("nome") or "").strip(),
-                "preco": float(p.get("preco") or 0),
-            }
-            for p in products
-            if str(p.get("codigo") or "").strip()
-        ]
-    }
+    payload_products = []
+    for p in products:
+        codigo = str(p.get("codigo") or "").strip()[:20]
+        if not codigo:
+            continue
+        item: Dict[str, Any] = {
+            "codigo": codigo,
+            "nome": str(p.get("nome") or "").strip(),
+            "preco": float(p.get("preco") or 0),
+        }
+        grupo = str(p.get("grupo") or "").strip()
+        if grupo:
+            item["grupo"] = grupo[:80]
+        payload_products.append(item)
+    payload = {"products": payload_products}
     body = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
         url,
@@ -914,9 +954,9 @@ def upsert_many(products: List[Dict[str, Any]]) -> Dict[str, Any]:
 
 def enable_all_products(q: str = "", limit: int = 2000) -> Dict[str, Any]:
     """Marca sync ON em todos os produtos listados (filtro q) e faz upsert imediato."""
-    if not is_product_sync_source_enabled():
-        raise RuntimeError(f"{erp_source_label()} desativado na configuração")
-    products = list_erp_products(q=q, limit=limit)
+    if not is_product_source_enabled():
+        raise RuntimeError(f"{source_error_label()} desativado na configuração")
+    products = list_source_products(q=q, limit=limit, force_refresh=True)
     # Sync exige código válido (não placeholders)
     products = [
         p
@@ -953,9 +993,8 @@ def sync_all_products(q: str = "", limit: int = 2000) -> Dict[str, Any]:
     Força sync de todos os produtos com sync automático ON.
     Se q for informado, restringe aos códigos que batem com a busca ERP atual.
     """
-    if not is_product_sync_source_enabled():
-        raise RuntimeError(f"{erp_source_label()} desativado na configuração")
-    source = erp_source_label()
+    if not is_product_source_enabled():
+        raise RuntimeError(f"{source_error_label()} desativado na configuração")
 
     enabled = db.list_sync_products(enabled_only=True)
     if not enabled:
@@ -971,7 +1010,7 @@ def sync_all_products(q: str = "", limit: int = 2000) -> Dict[str, Any]:
     if q:
         listed = {
             str(p.get("codigo") or "").strip()
-            for p in list_erp_products(q=q, limit=limit)
+            for p in list_source_products(q=q, limit=limit, force_refresh=True)
         }
         enabled = [item for item in enabled if item["codigo"] in listed]
 
@@ -989,11 +1028,11 @@ def sync_all_products(q: str = "", limit: int = 2000) -> Dict[str, Any]:
     missing = 0
     for item in enabled:
         codigo = item["codigo"]
-        remote = fetch_erp_product(codigo)
+        remote = fetch_source_product(codigo)
         if not remote:
             missing += 1
             db.update_sync_product_state(
-                codigo, last_error=f"produto não encontrado no {source}"
+                codigo, last_error=f"produto não encontrado no {source_error_label()}"
             )
             continue
         remotes.append(remote)
@@ -1004,7 +1043,7 @@ def sync_all_products(q: str = "", limit: int = 2000) -> Dict[str, Any]:
     result["missing"] = missing
     if missing and len(result.get("errors") or []) < 5:
         result.setdefault("errors", []).append(
-            f"{missing} produto(s) não encontrado(s) no {source}"
+            f"{missing} produto(s) não encontrado(s) no {source_error_label()}"
         )
     result["ok"] = int(result.get("failed") or 0) == 0
     return result
@@ -1016,10 +1055,9 @@ def sync_one(codigo: str, force: bool = False) -> Dict[str, Any]:
     if not local or (not local.get("enabled") and not force):
         return {"ok": False, "error": "produto não está em sync automático"}
 
-    source = erp_source_label()
-    remote = fetch_erp_product(codigo)
+    remote = fetch_source_product(codigo)
     if not remote:
-        err = f"produto não encontrado no {source}"
+        err = f"produto não encontrado no {source_error_label()}"
         db.update_sync_product_state(codigo, last_error=err)
         return {"ok": False, "error": err}
 
@@ -1056,7 +1094,7 @@ def sync_one(codigo: str, force: bool = False) -> Dict[str, Any]:
 
 
 def enable_product(codigo: str, enabled: bool = True) -> Dict[str, Any]:
-    remote = fetch_erp_product(codigo) if enabled else None
+    remote = fetch_source_product(codigo) if enabled else None
     nome = (remote or {}).get("nome") or ""
     preco = float((remote or {}).get("preco") or 0)
     db.set_sync_product_enabled(codigo, enabled, nome=nome, preco=preco)
@@ -1066,11 +1104,54 @@ def enable_product(codigo: str, enabled: bool = True) -> Dict[str, Any]:
     return sync_one(codigo, force=True)
 
 
+def poll_interval_sec() -> int:
+    return 60 if is_maisgestao_source() else POLL_INTERVAL_SEC
+
+
+def _poll_maisgestao_catalog() -> int:
+    """Um GET no catálogo do PDV; inclui produtos novos e só envia fingerprint alterado."""
+    products = list_source_products(limit=5000, force_refresh=True)
+    known = {p["codigo"]: p for p in db.list_sync_products()}
+    pending: List[Dict[str, Any]] = []
+    for p in products:
+        codigo = str(p.get("codigo") or "").strip()
+        if not codigo:
+            continue
+        local = known.get(codigo)
+        if local and not local.get("enabled"):
+            continue
+        if not local:
+            db.set_sync_product_enabled(
+                codigo,
+                True,
+                nome=p.get("nome") or "",
+                preco=float(p.get("preco") or 0),
+            )
+        elif local.get("fingerprint") == p.get("fingerprint") and not local.get(
+            "last_error"
+        ):
+            continue
+        pending.append(p)
+    if not pending:
+        return 0
+    result = upsert_many(pending)
+    sent = int(result.get("synced") or 0)
+    if sent:
+        logger.info(
+            "product_sync maisgestao synced=%s failed=%s total=%s",
+            sent,
+            result.get("failed"),
+            result.get("total"),
+        )
+    return sent
+
+
 def poll_once() -> int:
     """Sincroniza produtos enabled com fingerprint alterado. Retorna qtd enviada."""
-    if not is_product_sync_source_enabled():
+    if not is_product_source_enabled():
         return 0
-    source = erp_source_label()
+    if is_maisgestao_source():
+        return _poll_maisgestao_catalog()
     enabled = db.list_sync_products(enabled_only=True)
     if not enabled:
         return 0
@@ -1078,10 +1159,11 @@ def poll_once() -> int:
     for item in enabled:
         codigo = item["codigo"]
         try:
-            remote = fetch_erp_product(codigo)
+            remote = fetch_source_product(codigo)
             if not remote:
                 db.update_sync_product_state(
-                    codigo, last_error=f"produto não encontrado no {source}"
+                    codigo,
+                    last_error=f"produto não encontrado no {source_error_label()}",
                 )
                 continue
             if item.get("fingerprint") == remote["fingerprint"] and not item.get(
@@ -1108,40 +1190,57 @@ def poll_once() -> int:
 
 def _poll_loop():
     global _should_stop
-    logger.info("product_sync worker iniciado (intervalo=%ss)", POLL_INTERVAL_SEC)
+    interval = poll_interval_sec()
+    logger.info("product_sync worker iniciado (intervalo=%ss)", interval)
     while not _should_stop:
         try:
             poll_once()
         except Exception as e:
             logger.warning("product_sync poll_once: %s", e)
-        for _ in range(POLL_INTERVAL_SEC * 2):
+            try:
+                db.set_config("maisgestao_last_error" if is_maisgestao_source() else "uniplus_last_error", str(e)[:400])
+            except Exception:
+                pass
+        interval = poll_interval_sec()
+        for _ in range(max(1, interval) * 2):
             if _should_stop:
                 break
             time.sleep(0.5)
     logger.info("product_sync worker parado")
 
 
-def is_product_sync_poll_enabled() -> bool:
-    """Poll contínuo: UniPlus OFF por padrão (Postgres); PDV pode usar o mesmo flag."""
+def is_uniplus_product_sync_poll_enabled() -> bool:
+    """Poll UniPlus fica OFF por padrão — Unico reclama de conexão concorrente no Postgres."""
     raw = (db.get_config("uniplus_product_sync_poll") or "false").lower()
-    return raw in ("true", "1", "yes", "on") and is_product_sync_source_enabled()
+    return raw in ("true", "1", "yes", "on") and is_uniplus_enabled(db)
+
+
+def is_maisgestao_product_sync_poll_enabled() -> bool:
+    if not is_maisgestao_source():
+        return False
+    raw = (db.get_config("maisgestao_product_sync_poll") or "true").lower()
+    return raw in ("true", "1", "yes", "on")
+
+
+def is_product_sync_poll_enabled() -> bool:
+    return is_maisgestao_product_sync_poll_enabled() or is_uniplus_product_sync_poll_enabled()
 
 
 def start_product_sync_thread() -> None:
-    """Só inicia o poller se explicitamente habilitado na config."""
+    """Só inicia o poller se habilitado na config."""
     global _sync_thread, _should_stop
     if not is_product_sync_poll_enabled():
         logger.info(
-            "product_sync poll desligado (uniplus_product_sync_poll=false) — "
-            "sync só sob demanda na tela Produtos / jobs UniPlus"
+            "product_sync poll desligado — sync só sob demanda na tela Produtos"
         )
         return
     with _lock:
         if _sync_thread and _sync_thread.is_alive():
+            _should_stop = False
             return
         _should_stop = False
         _sync_thread = threading.Thread(
-            target=_poll_loop, name="uniplus-product-sync", daemon=True
+            target=_poll_loop, name="erp-product-sync", daemon=True
         )
         _sync_thread.start()
 
@@ -1151,10 +1250,20 @@ def stop_product_sync_thread() -> None:
     _should_stop = True
 
 
+def _poll_once_safe() -> None:
+    try:
+        poll_once()
+    except Exception as e:
+        logger.warning("product_sync refresh poll: %s", e)
+
+
 def refresh_product_sync_thread() -> None:
     """Liga/desliga o poller conforme a config atual (após salvar)."""
     if is_product_sync_poll_enabled():
         start_product_sync_thread()
+        threading.Thread(
+            target=_poll_once_safe, name="erp-product-sync-now", daemon=True
+        ).start()
     else:
         stop_product_sync_thread()
         logger.info("product_sync poll parado")

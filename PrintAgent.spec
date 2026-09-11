@@ -19,6 +19,7 @@ a = Analysis(
         'waitress.server',
         'waitress.task',
         'uniplus_handler',
+        'maisgestao_handler',
         'product_sync',
         'agent',
         'db',

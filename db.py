@@ -42,6 +42,8 @@ DEFAULT_CONFIG = {
     "pdv_lan_email": "",
     "pdv_lan_password": "",
     "pdv_lan_token": "",
+    "maisgestao_product_sync_poll": "true",
+    "maisgestao_last_error": "",
 }
 PRINTER_KEYS = ("device_id", "token", "printer_ip", "printer_port", "printer_type", "paper_width", "printer_encoding", "name", "connection_type", "printer_name_local")
 

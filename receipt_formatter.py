@@ -250,6 +250,7 @@ def format_order_receipt(data: dict) -> dict:
         items_by_group[grupo].append({
             "name": name,
             "quantity": quantity,
+            "base_value": base_value,
             "value": value,
             "total": item_total,
             "addons": addons_list,
