@@ -123,7 +123,32 @@ def init_db():
                 form_id INTEGER,
                 contact_name TEXT,
                 display_order INTEGER,
-                section TEXT
+                section TEXT,
+                contact_phone TEXT,
+                ask_phone INTEGER NOT NULL DEFAULT 0,
+                keyword_validation INTEGER NOT NULL DEFAULT 0
+            )
+        """)
+        mesa_cols = {
+            row[1]
+            for row in conn.execute("PRAGMA table_info(pos_mesas)").fetchall()
+        }
+        if "contact_phone" not in mesa_cols:
+            conn.execute("ALTER TABLE pos_mesas ADD COLUMN contact_phone TEXT")
+        if "ask_phone" not in mesa_cols:
+            conn.execute(
+                "ALTER TABLE pos_mesas ADD COLUMN ask_phone INTEGER NOT NULL DEFAULT 0"
+            )
+        if "keyword_validation" not in mesa_cols:
+            conn.execute(
+                "ALTER TABLE pos_mesas ADD COLUMN keyword_validation INTEGER NOT NULL DEFAULT 0"
+            )
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS pos_customers (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                phone TEXT NOT NULL UNIQUE,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
         conn.execute("""
@@ -612,8 +637,8 @@ def replace_pos_catalog(catalog: Dict[str, Any]) -> None:
             )
         for m in catalog.get("mesas") or []:
             conn.execute(
-                "INSERT INTO pos_mesas (id, number, name, type, status, form_id, contact_name, display_order, section) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO pos_mesas (id, number, name, type, status, form_id, contact_name, contact_phone, display_order, section, ask_phone, keyword_validation) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     int(m.get("id")),
                     str(m.get("number") or ""),
@@ -622,8 +647,11 @@ def replace_pos_catalog(catalog: Dict[str, Any]) -> None:
                     str(m.get("status") or "livre"),
                     m.get("formId"),
                     m.get("contactName"),
+                    m.get("contactPhone"),
                     int(m.get("displayOrder") or 0),
                     m.get("section"),
+                    1 if m.get("askPhone") else 0,
+                    1 if m.get("keywordValidation") else 0,
                 ),
             )
         for p in catalog.get("products") or []:
@@ -727,27 +755,36 @@ def get_pos_user(user_id: int) -> Optional[Dict[str, Any]]:
         conn.close()
 
 
+def _pos_mesa_from_row(row) -> Dict[str, Any]:
+    return {
+        "id": row[0],
+        "number": row[1] or "",
+        "name": row[2] or "",
+        "type": row[3] or "mesa",
+        "status": row[4] or "livre",
+        "formId": row[5],
+        "contactName": row[6],
+        "displayOrder": row[7] or 0,
+        "section": row[8],
+        "contactPhone": row[9],
+        "askPhone": bool(row[10]),
+        "keywordValidation": bool(row[11]),
+    }
+
+
+_POS_MESA_COLUMNS = (
+    "id, number, name, type, status, form_id, contact_name, display_order, section, "
+    "contact_phone, ask_phone, keyword_validation"
+)
+
+
 def list_pos_mesas() -> List[Dict[str, Any]]:
     conn = _get_connection()
     try:
         rows = conn.execute(
-            "SELECT id, number, name, type, status, form_id, contact_name, display_order, section "
-            "FROM pos_mesas ORDER BY display_order, number COLLATE NOCASE"
+            f"SELECT {_POS_MESA_COLUMNS} FROM pos_mesas ORDER BY display_order, number COLLATE NOCASE"
         ).fetchall()
-        return [
-            {
-                "id": r[0],
-                "number": r[1] or "",
-                "name": r[2] or "",
-                "type": r[3] or "mesa",
-                "status": r[4] or "livre",
-                "formId": r[5],
-                "contactName": r[6],
-                "displayOrder": r[7] or 0,
-                "section": r[8],
-            }
-            for r in rows
-        ]
+        return [_pos_mesa_from_row(r) for r in rows]
     finally:
         conn.close()
 
@@ -756,33 +793,28 @@ def get_pos_mesa(mesa_id: int) -> Optional[Dict[str, Any]]:
     conn = _get_connection()
     try:
         row = conn.execute(
-            "SELECT id, number, name, type, status, form_id, contact_name, display_order, section "
-            "FROM pos_mesas WHERE id = ?",
+            f"SELECT {_POS_MESA_COLUMNS} FROM pos_mesas WHERE id = ?",
             (int(mesa_id),),
         ).fetchone()
         if not row:
             return None
-        return {
-            "id": row[0],
-            "number": row[1] or "",
-            "name": row[2] or "",
-            "type": row[3] or "mesa",
-            "status": row[4] or "livre",
-            "formId": row[5],
-            "contactName": row[6],
-            "displayOrder": row[7] or 0,
-            "section": row[8],
-        }
+        return _pos_mesa_from_row(row)
     finally:
         conn.close()
 
 
-def update_pos_mesa(mesa_id: int, *, status: str, contact_name: Optional[str] = None) -> Optional[Dict[str, Any]]:
+def update_pos_mesa(
+    mesa_id: int,
+    *,
+    status: str,
+    contact_name: Optional[str] = None,
+    contact_phone: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
     conn = _get_connection()
     try:
         conn.execute(
-            "UPDATE pos_mesas SET status = ?, contact_name = ? WHERE id = ?",
-            (status, contact_name, int(mesa_id)),
+            "UPDATE pos_mesas SET status = ?, contact_name = ?, contact_phone = ? WHERE id = ?",
+            (status, contact_name, contact_phone, int(mesa_id)),
         )
         conn.commit()
     finally:
@@ -803,6 +835,63 @@ def update_pos_mesa_contact_name(
     finally:
         conn.close()
     return get_pos_mesa(mesa_id)
+
+
+def upsert_pos_customer(name: str, phone: str) -> Dict[str, Any]:
+    clean_name = str(name or "").strip() or "Cliente"
+    clean_phone = str(phone or "").strip()
+    conn = _get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO pos_customers (name, phone, updated_at)
+            VALUES (?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(phone) DO UPDATE SET
+              name = excluded.name,
+              updated_at = CURRENT_TIMESTAMP
+            """,
+            (clean_name, clean_phone),
+        )
+        conn.commit()
+        row = conn.execute(
+            "SELECT id, name, phone FROM pos_customers WHERE phone = ?",
+            (clean_phone,),
+        ).fetchone()
+        return {"id": row[0], "name": row[1], "phone": row[2]}
+    finally:
+        conn.close()
+
+
+def search_pos_customers(q: str, limit: int = 15) -> List[Dict[str, Any]]:
+    term = str(q or "").strip()
+    if len(term) < 2:
+        return []
+    digits = "".join(ch for ch in term if ch.isdigit())
+    conn = _get_connection()
+    try:
+        if digits:
+            rows = conn.execute(
+                """
+                SELECT id, name, phone FROM pos_customers
+                WHERE name LIKE ? COLLATE NOCASE OR phone LIKE ?
+                ORDER BY updated_at DESC
+                LIMIT ?
+                """,
+                (f"%{term}%", f"%{digits}%", int(limit)),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT id, name, phone FROM pos_customers
+                WHERE name LIKE ? COLLATE NOCASE
+                ORDER BY updated_at DESC
+                LIMIT ?
+                """,
+                (f"%{term}%", int(limit)),
+            ).fetchall()
+        return [{"id": r[0], "name": r[1], "phone": r[2]} for r in rows]
+    finally:
+        conn.close()
 
 
 def list_pos_products() -> List[Dict[str, Any]]:

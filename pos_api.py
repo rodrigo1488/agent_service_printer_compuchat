@@ -11,6 +11,7 @@ from flask import Blueprint, jsonify, request, send_file
 
 import db
 from pos_catalog import media_dir, sync_catalog_from_cloud
+from product_sync import _compuchat_request
 from uniplus_handler import (
     get_open_mesa_conta,
     handle_uniplus_job,
@@ -592,6 +593,30 @@ def pos_pedido_entregue(item_id: int):
     return jsonify({"ok": True, "id": item_id, "entregue": bool(flag)})
 
 
+def _normalize_phone(raw: Any) -> Optional[str]:
+    digits = "".join(ch for ch in str(raw or "") if ch.isdigit())
+    if not digits:
+        return None
+    if len(digits) in (10, 11):
+        digits = "55" + digits
+    if not digits.startswith("55") or len(digits) < 12 or len(digits) > 13:
+        raise ValueError("telefone_invalido")
+    return digits
+
+
+def _cloud_error_response(exc: Exception):
+    text = str(exc)
+    code = 400 if "HTTP 4" in text else 502
+    return jsonify({"error": text}), code
+
+
+@pos_bp.route("/pos/customers", methods=["GET"])
+@_require_pos_token
+def pos_customers():
+    q = request.args.get("q") or ""
+    return jsonify({"customers": db.search_pos_customers(q)})
+
+
 @pos_bp.route("/pos/mesas/<int:mesa_id>/ocupar", methods=["POST"])
 @_require_pos_token
 def pos_ocupar(mesa_id: int):
@@ -600,8 +625,96 @@ def pos_ocupar(mesa_id: int):
     mesa = db.get_pos_mesa(mesa_id)
     if not mesa:
         return jsonify({"error": "mesa_not_found"}), 404
-    updated = db.update_pos_mesa(mesa_id, status="ocupada", contact_name=customer_name)
-    return jsonify({"mesa": updated})
+    try:
+        phone = _normalize_phone(body.get("phone"))
+    except ValueError:
+        return jsonify({"error": "ERR_INVALID_PHONE"}), 400
+
+    if not phone:
+        updated = db.update_pos_mesa(
+            mesa_id, status="ocupada", contact_name=customer_name, contact_phone=None
+        )
+        return jsonify({"status": "occupied", "mesa": updated, "contactName": customer_name})
+
+    db.upsert_pos_customer(customer_name, phone)
+    try:
+        user_id = body.get("userId")
+        data = _compuchat_request(
+            "PUT",
+            f"/agent/pos/mesas/{mesa_id}/ocupar",
+            body={
+                "customerName": customer_name,
+                "phone": phone,
+                "userId": user_id,
+                "transferir": True,
+            },
+            timeout=40,
+        )
+    except Exception as exc:
+        return _cloud_error_response(exc)
+
+    if isinstance(data, dict) and data.get("status") == "pending_confirmation":
+        return jsonify(data), 202
+
+    updated = db.update_pos_mesa(
+        mesa_id,
+        status="ocupada",
+        contact_name=customer_name,
+        contact_phone=phone,
+    )
+    return jsonify(
+        {
+            "status": "occupied",
+            "mesa": updated,
+            "contactName": customer_name,
+            "contactPhone": phone,
+        }
+    )
+
+
+@pos_bp.route("/pos/mesas/<int:mesa_id>/confirmar-ocupacao", methods=["POST"])
+@_require_pos_token
+def pos_confirmar_ocupacao(mesa_id: int):
+    body = request.get_json(silent=True) or {}
+    keyword = str(body.get("keyword") or "").strip()
+    if not keyword:
+        return jsonify({"error": "ERR_MESA_KEYWORD_REQUIRED"}), 400
+    mesa = db.get_pos_mesa(mesa_id)
+    if not mesa:
+        return jsonify({"error": "mesa_not_found"}), 404
+    try:
+        phone = _normalize_phone(body.get("phone"))
+    except ValueError:
+        phone = None
+    customer_name = str(body.get("customerName") or "").strip()
+    try:
+        data = _compuchat_request(
+            "POST",
+            f"/agent/pos/mesas/{mesa_id}/confirmar-ocupacao",
+            body={"keyword": keyword},
+            timeout=30,
+        )
+    except Exception as exc:
+        return _cloud_error_response(exc)
+
+    contact_name = (
+        (data.get("contactName") if isinstance(data, dict) else None)
+        or customer_name
+        or mesa.get("contactName")
+        or "Cliente"
+    )
+    contact_phone = (
+        (data.get("contactPhone") if isinstance(data, dict) else None) or phone
+    )
+    if contact_phone:
+        db.upsert_pos_customer(str(contact_name), str(contact_phone))
+    updated = db.update_pos_mesa(
+        mesa_id,
+        status="ocupada",
+        contact_name=str(contact_name),
+        contact_phone=str(contact_phone) if contact_phone else None,
+    )
+    return jsonify({"status": "confirmed", "mesa": updated, "contactName": contact_name, "contactPhone": contact_phone})
 
 
 @pos_bp.route("/pos/mesas/<int:mesa_id>/contato-nome", methods=["PUT"])
