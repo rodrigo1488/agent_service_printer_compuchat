@@ -254,11 +254,45 @@
             <p class="hint" style="margin-top:-0.35rem; margin-bottom:0.85rem;">
                 Deixe <strong>desligado</strong> no dia a dia com o Unico aberto. Use “Sincronizar todos / Sync agora” na tela Produtos quando precisar.
             </p>
+            <p class="hint" style="margin-top:-0.35rem; margin-bottom:0.85rem;">
+                Informe host, porta, usuário, senha e o nome do banco. O agente monta a conexão internamente.
+            </p>
+            <div class="grid-2">
+                <div class="form-group">
+                    <label for="uniplus_host">Host</label>
+                    <input type="text" id="uniplus_host" name="uniplus_host"
+                           value="{{ uniplus_host }}"
+                           placeholder="192.168.1.126"
+                           autocomplete="off">
+                </div>
+                <div class="form-group">
+                    <label for="uniplus_port">Porta</label>
+                    <input type="number" id="uniplus_port" name="uniplus_port"
+                           value="{{ uniplus_port or 5432 }}"
+                           placeholder="5432" min="1" max="65535">
+                </div>
+                <div class="form-group">
+                    <label for="uniplus_user">Usuário</label>
+                    <input type="text" id="uniplus_user" name="uniplus_user"
+                           value="{{ uniplus_user }}"
+                           placeholder="compuchat"
+                           autocomplete="off">
+                </div>
+                <div class="form-group">
+                    <label for="uniplus_password">Senha</label>
+                    <input type="password" id="uniplus_password" name="uniplus_password"
+                           value=""
+                           placeholder="{% if uniplus_password_set %}•••••• (deixe em branco para manter){% else %}senha{% endif %}"
+                           autocomplete="new-password">
+                </div>
+            </div>
             <div class="form-group">
-                <label for="uniplus_connection_string">Connection string Postgres</label>
-                <input type="text" id="uniplus_connection_string" name="uniplus_connection_string"
-                       value="{{ uniplus_connection_string }}"
-                       placeholder="postgresql://user:pass@127.0.0.1:5432/unico">
+                <label for="uniplus_database">Banco de dados</label>
+                <input type="text" id="uniplus_database" name="uniplus_database"
+                       value="{{ uniplus_database or 'unico' }}"
+                       placeholder="unico"
+                       autocomplete="off">
+                <p class="hint">Nome do database no Postgres. No Unico o padrão é <strong>unico</strong>.</p>
             </div>
             <div class="grid-2">
                 <div class="form-group">
@@ -290,7 +324,7 @@
                     <input type="text" name="uniplus_contamesaitem_table" value="{{ uniplus_contamesaitem_table }}">
                 </div>
                 <div class="form-group">
-                    <label>tipopedido de mesa física (padrão 1 — PDV de mesa)</label>
+                    <label>tipopedido de mesa física (padrão 2)</label>
                     <input type="text" name="uniplus_mesa_tipopedido" value="{{ uniplus_mesa_tipopedido }}">
                 </div>
             </div>
@@ -308,6 +342,15 @@
                 <label for="pos_api_token">Token do POS (<code>X-Pos-Token</code>)</label>
                 <input type="text" id="pos_api_token" name="pos_api_token" value="{{ pos_api_token }}" placeholder="opcional">
             </div>
+            <div class="form-group check-row">
+                <input type="checkbox" id="pos_ask_phone" name="pos_ask_phone" value="on" {% if pos_ask_phone %}checked{% endif %}>
+                <label for="pos_ask_phone">Pedir telefone ao ocupar mesa ou comanda</label>
+            </div>
+            <div class="form-group check-row">
+                <input type="checkbox" id="pos_keyword_validation" name="pos_keyword_validation" value="on" {% if pos_keyword_validation %}checked{% endif %}>
+                <label for="pos_keyword_validation">Exigir palavra-chave no WhatsApp para liberar a mesa</label>
+            </div>
+            <p class="hint">Com a palavra-chave ligada, o telefone também aparece. Salve e abra a ocupação de novo no tablet. A chave só é enviada se o telefone for preenchido.</p>
             <p class="hint">Versão do catálogo local: <strong>{{ pos_catalog_version or 0 }}</strong>
                 {% if pos_last_sync_error %}<br>Último erro: {{ pos_last_sync_error }}{% endif %}
             </p>

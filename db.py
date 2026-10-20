@@ -2,6 +2,7 @@
 import sqlite3
 import json
 import os
+import unicodedata
 from datetime import datetime
 from typing import List, Dict, Any, Optional
 
@@ -12,6 +13,18 @@ from error_recovery import (
 )
 
 DB_FILE = "agent.db"
+
+
+def _fold(text: str) -> str:
+    """Minúsculas sem acento, para busca no estilo ILIKE."""
+    normalized = unicodedata.normalize("NFKD", str(text or ""))
+    stripped = "".join(ch for ch in normalized if not unicodedata.combining(ch))
+    return stripped.casefold().strip()
+
+
+def _like_contains(text: str) -> str:
+    raw = str(text or "").replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"%{raw}%"
 DEFAULT_CONFIG = {
     "printer_ip": "192.168.1.100",
     "printer_port": "9100",
@@ -23,6 +36,11 @@ DEFAULT_CONFIG = {
     "device_id": "",
     "restart_service_on_save": "true",
     "uniplus_enabled": "false",
+    "uniplus_host": "",
+    "uniplus_port": "5432",
+    "uniplus_user": "",
+    "uniplus_password": "",
+    "uniplus_database": "unico",
     "uniplus_connection_string": "",
     "uniplus_produto_table": "produto",
     "uniplus_produto_codigo_column": "codigo",
@@ -33,10 +51,12 @@ DEFAULT_CONFIG = {
     "uniplus_produto_nome_column": "nome",
     "uniplus_last_error": "",
     "pos_api_token": "",
+    "pos_ask_phone": "false",
+    "pos_keyword_validation": "false",
     "pos_catalog_version": "0",
     "pos_catalog_updated_at": "",
     "pos_last_sync_error": "",
-    "uniplus_mesa_tipopedido": "1",
+    "uniplus_mesa_tipopedido": "2",
     "erp_target": "uniplus",
     "pdv_lan_url": "http://127.0.0.1:5050",
     "pdv_lan_email": "",
@@ -148,9 +168,23 @@ def init_db():
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL,
                 phone TEXT NOT NULL UNIQUE,
+                name_fold TEXT,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        customer_cols = {
+            row[1]
+            for row in conn.execute("PRAGMA table_info(pos_customers)").fetchall()
+        }
+        if "name_fold" not in customer_cols:
+            conn.execute("ALTER TABLE pos_customers ADD COLUMN name_fold TEXT")
+        for row in conn.execute(
+            "SELECT id, name FROM pos_customers WHERE name_fold IS NULL OR name_fold = ''"
+        ):
+            conn.execute(
+                "UPDATE pos_customers SET name_fold = ? WHERE id = ?",
+                (_fold(row[1]), row[0]),
+            )
         conn.execute("""
             CREATE TABLE IF NOT EXISTS pos_products (
                 id INTEGER PRIMARY KEY,
@@ -204,17 +238,28 @@ def init_db():
                     (key, str(value)),
                 )
             conn.commit()
-        # Instalação antiga gravou 0 (delivery). O PDV de mesa do Uniplus usa 1.
+        # 0 é delivery e some da sala. O tipo de mesa usado aqui é 2.
         row = conn.execute(
             "SELECT value FROM config WHERE key = 'uniplus_mesa_tipopedido'"
         ).fetchone()
         if row is not None and str(row[0]).strip() == "0":
             conn.execute(
-                "UPDATE config SET value = '1' WHERE key = 'uniplus_mesa_tipopedido'"
+                "UPDATE config SET value = '2' WHERE key = 'uniplus_mesa_tipopedido'"
             )
             conn.commit()
     finally:
         conn.close()
+    _migrate_uniplus_connection_fields()
+
+
+def _migrate_uniplus_connection_fields() -> None:
+    """Instalações antigas só têm o DSN. Separa os campos sem alterar a string salva."""
+    try:
+        from uniplus_dsn import ensure_uniplus_fields_from_connection_string
+
+        ensure_uniplus_fields_from_connection_string(get_config, set_config)
+    except Exception as exc:
+        print(f"[WARN] UniPlus: falha ao ler a conexão já salva ({type(exc).__name__})")
 
 
 # --- Sync de produtos UniPlus → Compuchat ---
@@ -755,7 +800,22 @@ def get_pos_user(user_id: int) -> Optional[Dict[str, Any]]:
         conn.close()
 
 
+def _config_flag(key: str) -> bool:
+    return (get_config(key) or "").strip().lower() in ("true", "1", "yes", "on")
+
+
+def pos_occupation_settings() -> Dict[str, bool]:
+    """Interruptores do Print Agent para ocupação no POS."""
+    ask_phone = _config_flag("pos_ask_phone")
+    keyword = _config_flag("pos_keyword_validation")
+    return {
+        "askPhone": ask_phone or keyword,
+        "keywordValidation": keyword,
+    }
+
+
 def _pos_mesa_from_row(row) -> Dict[str, Any]:
+    settings = pos_occupation_settings()
     return {
         "id": row[0],
         "number": row[1] or "",
@@ -767,8 +827,8 @@ def _pos_mesa_from_row(row) -> Dict[str, Any]:
         "displayOrder": row[7] or 0,
         "section": row[8],
         "contactPhone": row[9],
-        "askPhone": bool(row[10]),
-        "keywordValidation": bool(row[11]),
+        "askPhone": bool(row[10]) or settings["askPhone"],
+        "keywordValidation": bool(row[11]) or settings["keywordValidation"],
     }
 
 
@@ -840,17 +900,20 @@ def update_pos_mesa_contact_name(
 def upsert_pos_customer(name: str, phone: str) -> Dict[str, Any]:
     clean_name = str(name or "").strip() or "Cliente"
     clean_phone = str(phone or "").strip()
+    if not clean_phone:
+        raise ValueError("telefone_obrigatorio")
     conn = _get_connection()
     try:
         conn.execute(
             """
-            INSERT INTO pos_customers (name, phone, updated_at)
-            VALUES (?, ?, CURRENT_TIMESTAMP)
+            INSERT INTO pos_customers (name, phone, name_fold, updated_at)
+            VALUES (?, ?, ?, CURRENT_TIMESTAMP)
             ON CONFLICT(phone) DO UPDATE SET
               name = excluded.name,
+              name_fold = excluded.name_fold,
               updated_at = CURRENT_TIMESTAMP
             """,
-            (clean_name, clean_phone),
+            (clean_name, clean_phone, _fold(clean_name)),
         )
         conn.commit()
         row = conn.execute(
@@ -862,32 +925,39 @@ def upsert_pos_customer(name: str, phone: str) -> Dict[str, Any]:
         conn.close()
 
 
-def search_pos_customers(q: str, limit: int = 15) -> List[Dict[str, Any]]:
+def search_pos_customers(q: str, limit: int = 30) -> List[Dict[str, Any]]:
+    """Busca parcial, sem diferenciar maiúsculas nem acentos, em nome e telefone."""
     term = str(q or "").strip()
-    if len(term) < 2:
-        return []
+    folded = _fold(term)
     digits = "".join(ch for ch in term if ch.isdigit())
     conn = _get_connection()
     try:
-        if digits:
+        if not folded and not digits:
             rows = conn.execute(
                 """
                 SELECT id, name, phone FROM pos_customers
-                WHERE name LIKE ? COLLATE NOCASE OR phone LIKE ?
                 ORDER BY updated_at DESC
                 LIMIT ?
                 """,
-                (f"%{term}%", f"%{digits}%", int(limit)),
+                (int(limit),),
             ).fetchall()
         else:
             rows = conn.execute(
                 """
                 SELECT id, name, phone FROM pos_customers
-                WHERE name LIKE ? COLLATE NOCASE
+                WHERE name_fold LIKE ? ESCAPE '\\'
+                   OR phone LIKE ? ESCAPE '\\'
+                   OR (? != '' AND phone LIKE ? ESCAPE '\\')
                 ORDER BY updated_at DESC
                 LIMIT ?
                 """,
-                (f"%{term}%", int(limit)),
+                (
+                    _like_contains(folded),
+                    _like_contains(term),
+                    digits,
+                    _like_contains(digits),
+                    int(limit),
+                ),
             ).fetchall()
         return [{"id": r[0], "name": r[1], "phone": r[2]} for r in rows]
     finally:

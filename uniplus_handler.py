@@ -8,6 +8,8 @@ import unicodedata
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+from uniplus_dsn import current_uniplus_dsn
+
 logger = logging.getLogger("uniplus")
 
 try:
@@ -101,7 +103,7 @@ def _safe_ident(name: str, default: str) -> str:
 def _cfg(db_module) -> Dict[str, str]:
     return {
         "enabled": (db_module.get_config("uniplus_enabled") or "false").lower(),
-        "connection_string": (db_module.get_config("uniplus_connection_string") or "").strip(),
+        "connection_string": current_uniplus_dsn(db_module),
         "produto_table": _safe_ident(
             db_module.get_config("uniplus_produto_table") or "produto", "produto"
         ),
@@ -119,6 +121,18 @@ def _cfg(db_module) -> Dict[str, str]:
             "contamesaitem",
         ),
     }
+
+
+def configured_mesa_tipopedido(db_module) -> int:
+    """Tipo de pedido de mesa no Uniplus. 0 é delivery; o padrão de mesa é 2."""
+    raw = db_module.get_config("uniplus_mesa_tipopedido")
+    try:
+        value = int(str(raw).strip())
+    except (TypeError, ValueError):
+        value = 2
+    if value == 0:
+        value = 2
+    return value
 
 
 def list_open_contas(
@@ -175,8 +189,10 @@ def list_open_contas(
         conn.close()
 
 
-def get_open_mesa_conta(db_module, numeromesa: int) -> Dict[str, Any]:
-    """Resumo da conta de mesa aberta (tipopedido=1). Delivery no mesmo número é ignorado."""
+def get_open_mesa_conta(
+    db_module, numeromesa: int, tipopedido: Optional[int] = None
+) -> Dict[str, Any]:
+    """Resumo da conta aberta do tipopedido configurado. Delivery (0) é ignorado."""
     empty = {
         "open": False,
         "numeromesa": int(numeromesa),
@@ -201,8 +217,14 @@ def get_open_mesa_conta(db_module, numeromesa: int) -> Dict[str, Any]:
             total_expr = "valortotal" if "valortotal" in cols else "0"
             where = "numeromesa = %s AND status = 1"
             params: List[Any] = [int(numeromesa)]
+            mesa_tipo = (
+                configured_mesa_tipopedido(db_module)
+                if tipopedido is None
+                else int(tipopedido)
+            )
             if "tipopedido" in cols:
-                where += " AND tipopedido = 1"
+                where += " AND tipopedido = %s"
+                params.append(mesa_tipo)
             cur.execute(
                 f"""
                 SELECT id, numeromesa, {cliente_expr} AS cliente, {total_expr} AS valortotal
@@ -286,7 +308,7 @@ def update_open_mesa_cliente_name(
     db_module,
     numeromesa: int,
     customer_name: str,
-    tipopedido: int = 1,
+    tipopedido: int = 2,
 ) -> bool:
     """Atualiza nome do cliente na conta aberta da mesa no Uniplus."""
     customer_name = str(customer_name or "").strip()[:60]
@@ -373,7 +395,9 @@ def _brasil_today():
     return (datetime.utcnow() - timedelta(hours=3)).date()
 
 
-def list_pedidos_dia(db_module, day=None) -> List[Dict[str, Any]]:
+def list_pedidos_dia(
+    db_module, day=None, tipopedido: Optional[int] = None
+) -> List[Dict[str, Any]]:
     """Itens de mesa lançados no dia (Brasília), mais recentes primeiro."""
     if not is_uniplus_enabled(db_module) or psycopg2 is None:
         return []
@@ -413,7 +437,13 @@ def list_pedidos_dia(db_module, day=None) -> List[Dict[str, Any]]:
             where = ["1=1"]
             params: List[Any] = []
             if "tipopedido" in mesa_cols:
-                where.append("m.tipopedido = 1")
+                mesa_tipo = (
+                    configured_mesa_tipopedido(db_module)
+                    if tipopedido is None
+                    else int(tipopedido)
+                )
+                where.append("m.tipopedido = %s")
+                params.append(mesa_tipo)
             if "cancelado" in item_cols:
                 where.append("COALESCE(i.cancelado, 0) = 0")
             date_parts = []
@@ -501,7 +531,7 @@ def set_item_entregue(db_module, item_id: int, entregue: bool) -> bool:
 
 def is_uniplus_enabled(db_module) -> bool:
     enabled = (db_module.get_config("uniplus_enabled") or "false").lower()
-    dsn = (db_module.get_config("uniplus_connection_string") or "").strip()
+    dsn = current_uniplus_dsn(db_module)
     return enabled in ("true", "1", "yes", "on") and bool(dsn)
 
 
@@ -510,12 +540,12 @@ def validate_uniplus_connection(
     contamesa_table: str = "contamesa",
     contamesaitem_table: str = "contamesaitem",
 ) -> Tuple[bool, str]:
-    """Testa DSN + existência das tabelas. Usado no save/health do agente."""
+    """Testa o DSN montado + existência das tabelas. Usado no save do agente."""
     if psycopg2 is None:
         return False, "psycopg2 não instalado"
     dsn = (connection_string or "").strip()
     if not dsn:
-        return False, "connection string vazia"
+        return False, "conexão UniPlus vazia"
     try:
         mesa = _safe_ident(contamesa_table, "contamesa")
         item = _safe_ident(contamesaitem_table, "contamesaitem")
@@ -940,6 +970,52 @@ def _bump_conta_totals(cur, mesa_table: str, conta_id: int, add_total: float, no
         pass
 
 
+def _update_open_conta(cur, mesa_table: str, conta_id: int, contamesa: Dict[str, Any], now: datetime) -> None:
+    """Atualiza modalidade, taxa, total e endereço de uma conta aberta."""
+    cols = _table_columns(cur, mesa_table)
+    assignments = []
+    values = []
+
+    def add(col: str, value) -> None:
+        if cols and col not in cols:
+            return
+        assignments.append(f"{col} = %s")
+        values.append(value)
+
+    add("retiradanobalcao", int(contamesa.get("retiradanobalcao") or 0))
+    add("valorentrega", float(contamesa.get("valorentrega") or 0))
+    add("valortotal", float(contamesa.get("valortotal") or 0))
+    add(
+        "valorcombinado",
+        float(contamesa.get("valorcombinado") or contamesa.get("valortotal") or 0),
+    )
+    for pay in (
+        "valordinheiro",
+        "valorcartao",
+        "valorpix",
+        "valorcarteiradigital",
+        "valoroutros",
+        "valorcheque",
+    ):
+        add(pay, float(contamesa.get(pay) or 0))
+    add("endereco", str(contamesa.get("endereco") or "")[:60])
+    add("endereconumero", str(contamesa.get("endereconumero") or "")[:12])
+    add("enderecobairro", str(contamesa.get("enderecobairro") or "")[:255])
+    add("enderecocomplemento", str(contamesa.get("enderecocomplemento") or "")[:255])
+    add("enderecoreferencia", str(contamesa.get("enderecoreferencia") or "")[:255])
+    add(
+        "timestampalteracao",
+        int(contamesa.get("timestampalteracao") or int(now.timestamp() * 1000)),
+    )
+    if not assignments:
+        return
+    values.append(int(conta_id))
+    cur.execute(
+        f"UPDATE {mesa_table} SET {', '.join(assignments)} WHERE id = %s AND status = 1",
+        tuple(values),
+    )
+
+
 def _existing_by_protocol(cur, mesa_table: str, protocol: str, summary: Dict[str, Any]) -> Dict[str, Any]:
     cur.execute(
         f"""
@@ -987,6 +1063,11 @@ def format_uniplus_log_message(result: Dict[str, Any]) -> str:
         return (
             f"UniPlus REUSO (já existia) conta={conta_id}{mesa_txt} protocol={protocol} "
             f"cliente={cliente} total={total} itens={n_itens}"
+        )
+    if action == "updated":
+        return (
+            f"UniPlus UPDATE conta={conta_id}{mesa_txt} protocol={protocol} "
+            f"cliente={cliente} total={total} retirada={result.get('retiradanobalcao')}"
         )
     itens = result.get("itens") or []
     itens_txt = ", ".join(
@@ -1208,12 +1289,34 @@ def handle_uniplus_job(db_module, conteudo: Dict[str, Any]) -> Dict[str, Any]:
 
                 existing_result = _existing_by_protocol(cur, mesa_table, protocol_key, summary)
                 if existing_result:
-                    logger.info(
-                        "UniPlus already_exists conta=%s mesa=%s protocol=%s",
-                        existing_result.get("conta_id"),
-                        existing_result.get("numeromesa"),
-                        protocol_key,
-                    )
+                    if conteudo.get("updateExisting"):
+                        _update_open_conta(
+                            cur,
+                            mesa_table,
+                            int(existing_result["conta_id"]),
+                            contamesa,
+                            now,
+                        )
+                        existing_result["action"] = "updated"
+                        existing_result["message"] = "updated"
+                        existing_result["valortotal"] = contamesa.get("valortotal")
+                        existing_result["retiradanobalcao"] = int(
+                            contamesa.get("retiradanobalcao") or 0
+                        )
+                        logger.info(
+                            "UniPlus updated conta=%s protocol=%s retirada=%s total=%s",
+                            existing_result.get("conta_id"),
+                            protocol_key,
+                            existing_result.get("retiradanobalcao"),
+                            existing_result.get("valortotal"),
+                        )
+                    else:
+                        logger.info(
+                            "UniPlus already_exists conta=%s mesa=%s protocol=%s",
+                            existing_result.get("conta_id"),
+                            existing_result.get("numeromesa"),
+                            protocol_key,
+                        )
                     return existing_result
 
                 cols = _table_columns(cur, mesa_table)
@@ -1244,11 +1347,11 @@ def handle_uniplus_job(db_module, conteudo: Dict[str, Any]) -> Dict[str, Any]:
 
                 if order_type == "mesa":
                     try:
-                        mesa_tipopedido = int(contamesa.get("tipopedido") or 1)
+                        mesa_tipopedido = int(contamesa.get("tipopedido") or 0)
                     except (TypeError, ValueError):
-                        mesa_tipopedido = 1
+                        mesa_tipopedido = 0
                     if mesa_tipopedido == 0:
-                        mesa_tipopedido = 1
+                        mesa_tipopedido = configured_mesa_tipopedido(db_module)
                     contamesa["tipopedido"] = mesa_tipopedido
 
                 if order_type == "mesa" and requested_mesa_int and requested_mesa_int > 0:
@@ -1260,7 +1363,9 @@ def handle_uniplus_job(db_module, conteudo: Dict[str, Any]) -> Dict[str, Any]:
                     cur.execute("SELECT pg_advisory_xact_lock(%s)", (872014001,))
 
                 if order_type == "mesa" and requested_mesa_int and requested_mesa_int > 0:
-                    tipopedido = int(contamesa.get("tipopedido") or 1)
+                    tipopedido = int(
+                        contamesa.get("tipopedido") or configured_mesa_tipopedido(db_module)
+                    )
                     open_conta = _open_conta_by_numeromesa(
                         cur, mesa_table, requested_mesa_int, tipopedido
                     )

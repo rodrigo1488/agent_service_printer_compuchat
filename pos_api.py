@@ -12,7 +12,9 @@ from flask import Blueprint, jsonify, request, send_file
 import db
 from pos_catalog import media_dir, sync_catalog_from_cloud
 from product_sync import _compuchat_request
+from uniplus_dsn import current_uniplus_dsn
 from uniplus_handler import (
+    configured_mesa_tipopedido,
     get_open_mesa_conta,
     handle_uniplus_job,
     is_uniplus_enabled,
@@ -399,7 +401,7 @@ def pos_health():
     uniplus_ok = False
     uniplus_msg = "disabled"
     if is_uniplus_enabled(db):
-        dsn = (db.get_config("uniplus_connection_string") or "").strip()
+        dsn = current_uniplus_dsn(db)
         uniplus_ok = bool(dsn)
         uniplus_msg = "configured" if dsn else "missing_dsn"
     return jsonify(
@@ -465,12 +467,27 @@ def pos_login():
     return jsonify({"ok": True, "user": {"id": user["id"], "name": user["name"]}})
 
 
-def _mesas_com_status_uniplus() -> List[Dict[str, Any]]:
+def _tipopedido_from_request() -> int:
+    """Tipo pedido pelo query do APK, ou a config do agente (padrão 2)."""
+    raw = (request.args.get("tipopedido") or "").strip()
+    if not raw:
+        return configured_mesa_tipopedido(db)
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return configured_mesa_tipopedido(db)
+    if value == 0:
+        return configured_mesa_tipopedido(db)
+    return value
+
+
+def _mesas_com_status_uniplus(tipopedido: Optional[int] = None) -> List[Dict[str, Any]]:
     """Lista do catálogo local + ocupação lida do Uniplus (conta aberta)."""
     mesas = db.list_pos_mesas()
     open_by_num: Dict[int, Dict[str, Any]] = {}
+    mesa_tipo = configured_mesa_tipopedido(db) if tipopedido is None else int(tipopedido)
     try:
-        for conta in list_open_contas(db, tipopedido=1):
+        for conta in list_open_contas(db, tipopedido=mesa_tipo):
             open_by_num[int(conta["numeromesa"])] = conta
     except Exception as exc:
         print(f"[POS] status Uniplus indisponível: {exc}")
@@ -513,7 +530,7 @@ def _mesas_com_status_uniplus() -> List[Dict[str, Any]]:
 @pos_bp.route("/pos/mesas", methods=["GET"])
 @_require_pos_token
 def pos_mesas():
-    return jsonify({"mesas": _mesas_com_status_uniplus()})
+    return jsonify({"mesas": _mesas_com_status_uniplus(_tipopedido_from_request())})
 
 
 @pos_bp.route("/pos/conta", methods=["GET"])
@@ -523,7 +540,9 @@ def pos_conta():
     if not numeromesa:
         return jsonify({"error": "numeromesa_required"}), 400
     try:
-        return jsonify(get_open_mesa_conta(db, numeromesa))
+        return jsonify(
+            get_open_mesa_conta(db, numeromesa, tipopedido=_tipopedido_from_request())
+        )
     except Exception as exc:
         return jsonify({"error": str(exc), "open": False, "itens": []}), 502
 
@@ -547,7 +566,7 @@ def pos_cancel_print_queue():
 @_require_pos_token
 def pos_pedidos():
     try:
-        itens = list_pedidos_dia(db)
+        itens = list_pedidos_dia(db, tipopedido=_tipopedido_from_request())
     except Exception as exc:
         return jsonify({"error": str(exc), "itens": [], "printers": []}), 502
     grupos = _grupo_by_codigo()
@@ -610,6 +629,18 @@ def _cloud_error_response(exc: Exception):
     return jsonify({"error": text}), code
 
 
+@pos_bp.route("/pos/order-settings", methods=["GET"])
+@_require_pos_token
+def pos_order_settings():
+    return jsonify({"tipopedido": configured_mesa_tipopedido(db)})
+
+
+@pos_bp.route("/pos/occupation-settings", methods=["GET"])
+@_require_pos_token
+def pos_occupation_settings():
+    return jsonify(db.pos_occupation_settings())
+
+
 @pos_bp.route("/pos/customers", methods=["GET"])
 @_require_pos_token
 def pos_customers():
@@ -647,10 +678,29 @@ def pos_ocupar(mesa_id: int):
                 "phone": phone,
                 "userId": user_id,
                 "transferir": True,
+                "forceKeyword": db.pos_occupation_settings()["keywordValidation"],
             },
             timeout=40,
         )
     except Exception as exc:
+        text = str(exc)
+        # Cliente já cadastrado ou contato/WhatsApp indisponível no cloud não
+        # pode impedir a ocupação. Mesa inexistente continua erro.
+        if ("HTTP 404" in text or "HTTP 409" in text) and "ERR_MESA_NOT_FOUND" not in text:
+            updated = db.update_pos_mesa(
+                mesa_id,
+                status="ocupada",
+                contact_name=customer_name,
+                contact_phone=phone,
+            )
+            return jsonify(
+                {
+                    "status": "occupied",
+                    "mesa": updated,
+                    "contactName": customer_name,
+                    "contactPhone": phone,
+                }
+            )
         return _cloud_error_response(exc)
 
     if isinstance(data, dict) and data.get("status") == "pending_confirmation":
@@ -738,6 +788,9 @@ def pos_trocar_nome(mesa_id: int):
         updated = db.update_pos_mesa_contact_name(mesa_id, customer_name)
         if updated:
             updated["status"] = updated.get("status") or "ocupada"
+            phone = str(updated.get("contactPhone") or "").strip()
+            if phone:
+                db.upsert_pos_customer(customer_name, phone)
     elif mesa_id < 0:
         numeromesa = abs(int(mesa_id))
     else:
@@ -745,12 +798,7 @@ def pos_trocar_nome(mesa_id: int):
 
     uniplus_updated = False
     if numeromesa is not None:
-        try:
-            tipopedido = int(db.get_config("uniplus_mesa_tipopedido") or 1)
-        except (TypeError, ValueError):
-            tipopedido = 1
-        if tipopedido == 0:
-            tipopedido = 1
+        tipopedido = configured_mesa_tipopedido(db)
         try:
             uniplus_updated = update_open_mesa_cliente_name(
                 db, int(numeromesa), customer_name, tipopedido=tipopedido
@@ -826,13 +874,8 @@ def pos_orders():
 
     total = round(sum(float(it.get("valortotal") or 0) for it in itens), 2)
     now = datetime.now(timezone.utc)
-    # PDV de mesa no Uniplus usa tipopedido=1; 0 é delivery e some da sala.
-    try:
-        tipopedido = int(db.get_config("uniplus_mesa_tipopedido") or 1)
-    except (TypeError, ValueError):
-        tipopedido = 1
-    if tipopedido == 0:
-        tipopedido = 1
+    # 0 é delivery e some da sala. Mesa usa o tipopedido da config (padrão 2).
+    tipopedido = configured_mesa_tipopedido(db)
     conteudo = {
         "event": "uniplus.delivery",
         "protocol": protocol,

@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import json
 import logging
-import ssl
 import threading
 import time
 import unicodedata
@@ -19,6 +18,8 @@ from maisgestao_handler import (
     is_maisgestao_enabled,
     list_pdv_products,
 )
+from ssl_compat import install_insecure_ssl, unverified_ssl_context
+from uniplus_dsn import current_uniplus_dsn
 from uniplus_handler import (
     _safe_ident,
     is_uniplus_enabled,
@@ -28,12 +29,13 @@ from uniplus_handler import (
 
 logger = logging.getLogger("product_sync")
 
+# Garante bypass SSL mesmo se algum urlopen esquecer context=
+install_insecure_ssl()
 
-def _ssl_unverified_context() -> ssl.SSLContext:
+
+def _ssl_unverified_context():
     """Mesmo critério do WebSocket: cert autoassinado/cadeia incompleta no SaaS."""
-    ctx = ssl._create_unverified_context()
-    ctx.check_hostname = False
-    return ctx
+    return unverified_ssl_context()
 
 # Intervalo alto de propósito — poll contínuo conflita com o Unico no mesmo Postgres.
 POLL_INTERVAL_SEC = 300
@@ -84,7 +86,7 @@ def _produto_cfg() -> Dict[str, str]:
 def _connect_uniplus():
     if psycopg2 is None:
         raise RuntimeError("psycopg2 não instalado")
-    dsn = (db.get_config("uniplus_connection_string") or "").strip()
+    dsn = current_uniplus_dsn(db)
     if not dsn:
         raise RuntimeError("uniplus_connection_string vazio")
     conn = psycopg2.connect(dsn, connect_timeout=8)
@@ -369,6 +371,13 @@ def _compuchat_request(
     except urllib.error.HTTPError as e:
         detail = e.read().decode("utf-8", errors="replace")[:400]
         raise RuntimeError(f"HTTP {e.code}: {detail}") from e
+    except urllib.error.URLError as e:
+        reason = getattr(e, "reason", e)
+        raise RuntimeError(
+            f"Falha HTTPS Compuchat ({url}): {reason}. "
+            "Se o servidor usa certificado autoassinado, reinicie o Print Agent "
+            "(versão com ssl_compat)."
+        ) from e
 
 
 def list_compuchat_catalog(

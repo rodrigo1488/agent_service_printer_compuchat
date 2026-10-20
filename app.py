@@ -8,7 +8,22 @@ from typing import List, Optional
 from flask import Flask, request, redirect, url_for, render_template, jsonify, send_file
 from flask_cors import CORS
 
+# Antes de qualquer HTTPS (produtos/adicionais Compuchat com cert autoassinado)
+from ssl_compat import install_insecure_ssl
+
+install_insecure_ssl()
+
 import db
+from uniplus_dsn import (
+    DEFAULT_DATABASE,
+    DEFAULT_PORT,
+    build_uniplus_dsn,
+    current_uniplus_dsn,
+    ensure_uniplus_fields_from_connection_string,
+    normalize_uniplus_port,
+    redact_connection_details,
+    resolve_uniplus_password,
+)
 from agent import start_agent_thread, stop_agent
 from product_sync import refresh_product_sync_thread, start_product_sync_thread
 from error_recovery import DataValidator, DatabaseRecovery
@@ -48,7 +63,12 @@ def _config_context():
     printers = db.get_printers()
     restart_on_save = (db.get_config("restart_service_on_save") or "true").lower() == "true"
     uniplus_enabled = (db.get_config("uniplus_enabled") or "false").lower() in ("true", "1", "yes", "on")
-    uniplus_connection_string = db.get_config("uniplus_connection_string") or ""
+    ensure_uniplus_fields_from_connection_string(db.get_config, db.set_config)
+    uniplus_host = db.get_config("uniplus_host") or ""
+    uniplus_port = db.get_config("uniplus_port") or str(DEFAULT_PORT)
+    uniplus_user = db.get_config("uniplus_user") or ""
+    uniplus_password_set = bool(db.get_config("uniplus_password") or "")
+    uniplus_database = db.get_config("uniplus_database") or DEFAULT_DATABASE
     uniplus_produto_table = db.get_config("uniplus_produto_table") or "produto"
     uniplus_produto_codigo_column = db.get_config("uniplus_produto_codigo_column") or "codigo"
     uniplus_produto_id_column = db.get_config("uniplus_produto_id_column") or "id"
@@ -63,7 +83,19 @@ def _config_context():
         "true", "1", "yes", "on"
     )
     pos_api_token = db.get_config("pos_api_token") or ""
-    uniplus_mesa_tipopedido = db.get_config("uniplus_mesa_tipopedido") or "1"
+    pos_ask_phone = (db.get_config("pos_ask_phone") or "false").lower() in (
+        "true",
+        "1",
+        "yes",
+        "on",
+    )
+    pos_keyword_validation = (db.get_config("pos_keyword_validation") or "false").lower() in (
+        "true",
+        "1",
+        "yes",
+        "on",
+    )
+    uniplus_mesa_tipopedido = db.get_config("uniplus_mesa_tipopedido") or "2"
     erp_target = (db.get_config("erp_target") or "uniplus").strip().lower()
     if erp_target not in ("uniplus", "maisgestao"):
         erp_target = "uniplus"
@@ -77,7 +109,11 @@ def _config_context():
         "printers": printers,
         "restart_service_on_save": restart_on_save,
         "uniplus_enabled": uniplus_enabled,
-        "uniplus_connection_string": uniplus_connection_string,
+        "uniplus_host": uniplus_host,
+        "uniplus_port": uniplus_port,
+        "uniplus_user": uniplus_user,
+        "uniplus_password_set": uniplus_password_set,
+        "uniplus_database": uniplus_database,
         "uniplus_produto_table": uniplus_produto_table,
         "uniplus_produto_codigo_column": uniplus_produto_codigo_column,
         "uniplus_produto_id_column": uniplus_produto_id_column,
@@ -88,6 +124,8 @@ def _config_context():
         "uniplus_product_sync_poll": uniplus_product_sync_poll,
         "maisgestao_product_sync_poll": maisgestao_product_sync_poll,
         "pos_api_token": pos_api_token,
+        "pos_ask_phone": pos_ask_phone,
+        "pos_keyword_validation": pos_keyword_validation,
         "uniplus_mesa_tipopedido": uniplus_mesa_tipopedido,
         "erp_target": erp_target,
         "pdv_lan_url": pdv_lan_url,
@@ -207,11 +245,17 @@ def _build_health_status():
     from maisgestao_handler import get_erp_target, is_maisgestao_enabled
 
     uniplus_on = is_uniplus_enabled(db)
+    uniplus_dsn = current_uniplus_dsn(db)
     uniplus_info = {
         "enabled": uniplus_on,
+        "configured": bool(uniplus_dsn),
         "db_ok": None,
         "product_sync_poll": is_uniplus_product_sync_poll_enabled(),
-        "last_error": db.get_config("uniplus_last_error") or "",
+        "last_error": redact_connection_details(
+            db.get_config("uniplus_last_error") or "",
+            dsn=uniplus_dsn,
+            password=db.get_config("uniplus_password") or "",
+        ),
         "note": "conexão sob demanda (jobs/produtos); health não testa o Postgres",
     }
     health_status["uniplus"] = uniplus_info
@@ -229,6 +273,64 @@ def _build_health_status():
         health_status["status"] = "degraded"
 
     return health_status
+
+
+def _uniplus_fields_from_form() -> dict:
+    """Lê host/porta/usuário/banco do POST. Senha em branco mantém a gravada."""
+    host = (request.form.get("uniplus_host") or "").strip()
+    port = str(normalize_uniplus_port(request.form.get("uniplus_port")))
+    user = (request.form.get("uniplus_user") or "").strip()
+    database = (request.form.get("uniplus_database") or "").strip() or DEFAULT_DATABASE
+    submitted = request.form.get("uniplus_password")
+    if submitted is None:
+        submitted = ""
+    password = resolve_uniplus_password(submitted, db.get_config("uniplus_password") or "")
+    dsn = build_uniplus_dsn(host, port, user, password, database) if host else ""
+    return {
+        "host": host,
+        "port": port,
+        "user": user,
+        "password": password,
+        "database": database,
+        "dsn": dsn,
+    }
+
+
+def _uniplus_fields_from_config() -> dict:
+    """Formulário antigo, sem os campos novos: não apaga a conexão já salva."""
+    host = (db.get_config("uniplus_host") or "").strip()
+    port = str(normalize_uniplus_port(db.get_config("uniplus_port") or DEFAULT_PORT))
+    user = db.get_config("uniplus_user") or ""
+    password = db.get_config("uniplus_password") or ""
+    database = (db.get_config("uniplus_database") or "").strip() or DEFAULT_DATABASE
+    return {
+        "host": host,
+        "port": port,
+        "user": user,
+        "password": password,
+        "database": database,
+        "dsn": current_uniplus_dsn(db),
+    }
+
+
+def _redact_uniplus_error(text: str) -> str:
+    try:
+        stored = db.get_config("uniplus_password") or ""
+        posted = ""
+        try:
+            posted = request.form.get("uniplus_password") or ""
+        except Exception:
+            posted = ""
+        try:
+            dsn = current_uniplus_dsn(db)
+        except Exception:
+            dsn = ""
+        out = redact_connection_details(text, dsn=dsn, password=stored)
+        if posted:
+            out = redact_connection_details(out, password=posted)
+        return out
+    except Exception:
+        return "Erro ao salvar a configuração"
 
 
 @app.route("/")
@@ -249,7 +351,11 @@ def config():
 
             # UniPlus Gourmet (Postgres local) — validar antes de persistir
             uniplus_enabled = request.form.get("uniplus_enabled", "").lower() in ("true", "1", "on", "yes")
-            uniplus_dsn = request.form.get("uniplus_connection_string", "").strip()
+            if "uniplus_host" in request.form:
+                uniplus_fields = _uniplus_fields_from_form()
+            else:
+                uniplus_fields = _uniplus_fields_from_config()
+            uniplus_dsn = uniplus_fields["dsn"]
             uniplus_tables = {
                 "uniplus_produto_table": request.form.get("uniplus_produto_table", "produto").strip() or "produto",
                 "uniplus_produto_codigo_column": request.form.get("uniplus_produto_codigo_column", "codigo").strip() or "codigo",
@@ -265,13 +371,20 @@ def config():
                     raise ValueError(f"Identificador UniPlus inválido em {key}: {value}")
 
             if uniplus_enabled:
+                if not uniplus_fields["host"]:
+                    raise ValueError("UniPlus: informe o host do Postgres")
                 ok_dsn, dsn_msg = validate_uniplus_connection(
                     uniplus_dsn,
                     contamesa_table=uniplus_tables["uniplus_contamesa_table"],
                     contamesaitem_table=uniplus_tables["uniplus_contamesaitem_table"],
                 )
                 if not ok_dsn:
-                    raise ValueError(f"UniPlus Postgres inválido: {dsn_msg}")
+                    safe_msg = redact_connection_details(
+                        dsn_msg,
+                        dsn=uniplus_dsn,
+                        password=uniplus_fields["password"],
+                    )
+                    raise ValueError(f"UniPlus Postgres inválido: {safe_msg}")
                 db.set_config("uniplus_last_error", "")
             else:
                 db.set_config("uniplus_last_error", "")
@@ -316,11 +429,29 @@ def config():
             ).lower() in ("true", "1", "on", "yes")
 
             db.set_config("uniplus_enabled", "true" if uniplus_enabled else "false")
+            db.set_config("uniplus_host", uniplus_fields["host"])
+            db.set_config("uniplus_port", uniplus_fields["port"])
+            db.set_config("uniplus_user", uniplus_fields["user"])
+            db.set_config("uniplus_password", uniplus_fields["password"])
+            db.set_config("uniplus_database", uniplus_fields["database"])
             db.set_config("uniplus_connection_string", uniplus_dsn)
             db.set_config("pos_api_token", request.form.get("pos_api_token", "").strip())
             db.set_config(
+                "pos_ask_phone",
+                "true"
+                if request.form.get("pos_ask_phone", "").lower() in ("true", "1", "on", "yes")
+                else "false",
+            )
+            db.set_config(
+                "pos_keyword_validation",
+                "true"
+                if request.form.get("pos_keyword_validation", "").lower()
+                in ("true", "1", "on", "yes")
+                else "false",
+            )
+            db.set_config(
                 "uniplus_mesa_tipopedido",
-                (request.form.get("uniplus_mesa_tipopedido") or "1").strip() or "1",
+                (request.form.get("uniplus_mesa_tipopedido") or "2").strip() or "2",
             )
             db.set_config(
                 "uniplus_product_sync_poll",
@@ -403,9 +534,9 @@ def config():
             )
         except Exception as e:
             import traceback
-            error_msg = f"Erro: {str(e)}"
+            error_msg = _redact_uniplus_error(f"Erro: {e}")
             print(f"[ERROR] Erro ao salvar configuração: {error_msg}")
-            print(f"[ERROR] Traceback: {traceback.format_exc()}")
+            print(f"[ERROR] Traceback: {_redact_uniplus_error(traceback.format_exc())}")
             try:
                 db.set_config("uniplus_last_error", error_msg[:500])
             except Exception:

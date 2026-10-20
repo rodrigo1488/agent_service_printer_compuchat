@@ -7,6 +7,10 @@ import threading
 import time
 from datetime import datetime
 
+from ssl_compat import install_insecure_ssl
+
+install_insecure_ssl()
+
 import db
 from printer_service import PrinterService
 from receipt_formatter import format_order_receipt

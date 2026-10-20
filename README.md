@@ -152,7 +152,7 @@ Obrigado pela preferência!
 ## Solução de Problemas
 
 ### Erro SSL: CERTIFICATE_VERIFY_FAILED
-O agente desativa a verificação do certificado SSL na conexão WebSocket (apenas para essa conexão), para funcionar com servidor que usa certificado autoassinado. Configurado diretamente em `agent.py` (`SSLOPT_WS`).
+O agente desativa a verificação do certificado SSL no WebSocket (`agent.py` / `SSLOPT_WS`) e nas chamadas HTTPS (produtos, adicionais, sync, POS catalog) via `ssl_compat.py`. Isso cobre servidor com certificado autoassinado ou cadeia incompleta. Se o erro continuar na tela de Produtos, reinicie o agente (ou gere de novo o `.exe` com `build.bat`) para carregar o `ssl_compat`.
 
 ### Impressora não imprime
 1. Verifique se o IP está correto

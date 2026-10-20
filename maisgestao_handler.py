@@ -8,6 +8,10 @@ import urllib.error
 import urllib.request
 from typing import Any, Dict, List, Optional, Tuple
 
+from ssl_compat import install_insecure_ssl, unverified_ssl_context
+
+install_insecure_ssl()
+
 PDV_CATALOG_CACHE_TTL_SEC = 8.0
 _pdv_catalog_cache: Dict[str, Any] = {"at": 0.0, "data": None}
 CODIGO_COMPUCHAT_MAX = 20
@@ -59,7 +63,9 @@ def _http_json(
         data = json.dumps(body).encode("utf-8")
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with urllib.request.urlopen(
+            req, timeout=timeout, context=unverified_ssl_context()
+        ) as resp:
             raw = resp.read().decode("utf-8") or "{}"
             try:
                 parsed = json.loads(raw)
