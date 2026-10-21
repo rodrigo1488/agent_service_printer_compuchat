@@ -58,6 +58,64 @@ def _resolve_font_scale(receipt_data) -> int:
     return 1
 
 
+def normalize_font_mode(value) -> str:
+    """auto = tamanho enviado no pedido; 1/2/3 fixam a fonte nesta impressora."""
+    raw = str(value or "auto").strip().lower()
+    if raw in ("1", "normal"):
+        return "1"
+    if raw in ("2", "grande", "large"):
+        return "2"
+    if raw in ("3", "extra", "xlarge", "extra_grande"):
+        return "3"
+    return "auto"
+
+
+def font_scale_for_mode(mode, order_scale) -> int:
+    normalized = normalize_font_mode(mode)
+    if normalized == "auto":
+        try:
+            scale = int(order_scale or 1)
+        except (TypeError, ValueError):
+            scale = 1
+        return min(3, max(1, scale))
+    return int(normalized)
+
+
+def font_mode_label(mode) -> str:
+    return {
+        "auto": "Automatico",
+        "1": "Normal",
+        "2": "Grande",
+        "3": "Extra grande",
+    }.get(normalize_font_mode(mode), "Automatico")
+
+
+def apply_printer_font_mode(receipt, printer_cfg, source=None):
+    """Aplica o modo de fonte da impressora ao cupom já formatado."""
+    if not isinstance(receipt, dict):
+        return receipt
+    cfg = printer_cfg if isinstance(printer_cfg, dict) else {}
+    origin = source if isinstance(source, dict) else receipt
+    order_type = str(origin.get("orderType") or origin.get("order_type") or "").strip().lower()
+    fulfillment = str(
+        origin.get("fulfillmentMode") or origin.get("fulfillment_mode") or ""
+    ).strip().lower()
+    is_mesa = order_type == "mesa" or bool(
+        origin.get("tableNumber") or origin.get("table_number")
+    )
+    takeaway = fulfillment == "pickup" or origin.get("pickup") is True or origin.get("retirada") is True
+    if is_mesa and takeaway:
+        mode = cfg.get("font_mode_takeaway")
+    elif is_mesa:
+        mode = cfg.get("font_mode_dine_in")
+    else:
+        mode = cfg.get("font_mode")
+    scale = font_scale_for_mode(mode, _resolve_font_scale(receipt))
+    receipt["font_scale"] = scale
+    receipt["printFontScale"] = scale
+    return receipt
+
+
 def _layout_width_for_font_scale(paper_width: int, scale: int) -> int:
     w = min(max(int(paper_width or 32), 24), 48)
     if int(scale or 1) >= 3:
@@ -433,6 +491,10 @@ class PrinterService:
             lines.append(f"Garcom: {receipt['garcom_name'][:W-10]}")
         if receipt.get('table_number') or receipt.get('garcom_name'):
             lines.append("")
+        if is_mesa and (receipt.get("is_pickup") or receipt.get("fulfillment_mode") == "pickup"):
+            lines.append(_bold("PARA LEVAR"))
+        elif is_mesa and receipt.get("fulfillment_mode") == "dine_in":
+            lines.append(_bold("CONSUMO NO LOCAL"))
         lines.append("")
 
         # Dados do cliente

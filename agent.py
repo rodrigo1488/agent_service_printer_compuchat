@@ -12,7 +12,7 @@ from ssl_compat import install_insecure_ssl
 install_insecure_ssl()
 
 import db
-from printer_service import PrinterService
+from printer_service import PrinterService, apply_printer_font_mode
 from receipt_formatter import format_order_receipt
 from error_recovery import (
     retry_with_backoff,
@@ -468,6 +468,7 @@ def _handle_print_job(ws, job_id: int, conteudo: dict, printer_config: dict):
                 receipt["font_scale"] = int(receipt.get("printFontScale") or 1)
             except (TypeError, ValueError):
                 pass
+        apply_printer_font_mode(receipt, latest_config, conteudo)
 
         # Retry automÃ¡tico para impressÃ£o com backoff exponencial
         @retry_with_backoff(RetryConfig(

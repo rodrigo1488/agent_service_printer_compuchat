@@ -362,6 +362,11 @@ class DataValidator:
         valid_encodings = ["cp850", "cp860", "cp1252", "utf-8"]
         if sanitized["printer_encoding"] not in valid_encodings:
             sanitized["printer_encoding"] = "cp850"
+
+        from printer_service import normalize_font_mode
+        sanitized["font_mode"] = normalize_font_mode(config.get("font_mode"))
+        sanitized["font_mode_dine_in"] = normalize_font_mode(config.get("font_mode_dine_in"))
+        sanitized["font_mode_takeaway"] = normalize_font_mode(config.get("font_mode_takeaway"))
         
         sanitized["name"] = str(config.get("name", "")).strip()
         

@@ -181,6 +181,36 @@
                         </select>
                     </div>
                 </div>
+                <p class="hint" style="margin-bottom: 0.6rem;">Tamanho da fonte nesta impressora. Automático usa o tamanho enviado pelo pedido. Normal, Grande e Extra grande fixam o cupom.</p>
+                <div class="form-group">
+                    <label>Cardápio e delivery</label>
+                    <select name="printer_{{ loop.index0 }}_font_mode">
+                        <option value="auto" {% if (p.get('font_mode') or 'auto') == 'auto' %}selected{% endif %}>Automático (tamanho do pedido)</option>
+                        <option value="1" {% if p.get('font_mode') == '1' %}selected{% endif %}>Normal</option>
+                        <option value="2" {% if p.get('font_mode') == '2' %}selected{% endif %}>Grande</option>
+                        <option value="3" {% if p.get('font_mode') == '3' %}selected{% endif %}>Extra grande</option>
+                    </select>
+                </div>
+                <div class="grid-2">
+                    <div class="form-group">
+                        <label>Consumo no local (POS)</label>
+                        <select name="printer_{{ loop.index0 }}_font_mode_dine_in">
+                            <option value="auto" {% if (p.get('font_mode_dine_in') or 'auto') == 'auto' %}selected{% endif %}>Automático</option>
+                            <option value="1" {% if p.get('font_mode_dine_in') == '1' %}selected{% endif %}>Normal</option>
+                            <option value="2" {% if p.get('font_mode_dine_in') == '2' %}selected{% endif %}>Grande</option>
+                            <option value="3" {% if p.get('font_mode_dine_in') == '3' %}selected{% endif %}>Extra grande</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>Para levar (POS)</label>
+                        <select name="printer_{{ loop.index0 }}_font_mode_takeaway">
+                            <option value="auto" {% if (p.get('font_mode_takeaway') or 'auto') == 'auto' %}selected{% endif %}>Automático</option>
+                            <option value="1" {% if p.get('font_mode_takeaway') == '1' %}selected{% endif %}>Normal</option>
+                            <option value="2" {% if p.get('font_mode_takeaway') == '2' %}selected{% endif %}>Grande</option>
+                            <option value="3" {% if p.get('font_mode_takeaway') == '3' %}selected{% endif %}>Extra grande</option>
+                        </select>
+                    </div>
+                </div>
                 <div class="printer-actions">
                     <button type="button" class="btn-test-printer btn-secondary" data-index="{{ loop.index0 }}">Testar impressora</button>
                     <button type="button" class="btn-cancel-queue btn-ghost" data-index="{{ loop.index0 }}">Marcar fila como impressa</button>
@@ -482,6 +512,36 @@
                 </select>
             </div>
         </div>
+        <p class="hint" style="margin-bottom: 0.6rem;">Tamanho da fonte nesta impressora. Automático usa o tamanho enviado pelo pedido. Normal, Grande e Extra grande fixam o cupom.</p>
+        <div class="form-group">
+            <label>Cardápio e delivery</label>
+            <select name="printer_X_font_mode">
+                <option value="auto" selected>Automático (tamanho do pedido)</option>
+                <option value="1">Normal</option>
+                <option value="2">Grande</option>
+                <option value="3">Extra grande</option>
+            </select>
+        </div>
+        <div class="grid-2">
+            <div class="form-group">
+                <label>Consumo no local (POS)</label>
+                <select name="printer_X_font_mode_dine_in">
+                    <option value="auto" selected>Automático</option>
+                    <option value="1">Normal</option>
+                    <option value="2">Grande</option>
+                    <option value="3">Extra grande</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label>Para levar (POS)</label>
+                <select name="printer_X_font_mode_takeaway">
+                    <option value="auto" selected>Automático</option>
+                    <option value="1">Normal</option>
+                    <option value="2">Grande</option>
+                    <option value="3">Extra grande</option>
+                </select>
+            </div>
+        </div>
         <div class="printer-actions">
             <button type="button" class="btn-test-printer btn-secondary" data-index="X">Testar impressora</button>
             <button type="button" class="btn-cancel-queue btn-ghost" data-index="X">Marcar fila como impressa</button>
@@ -582,10 +642,16 @@
     function printerPayload(block, index) {
         var prefix = 'printer_' + index + '_';
         var connectionType = block.querySelector('[name="' + prefix + 'connection_type"]').value;
+        var fontMode = block.querySelector('[name="' + prefix + 'font_mode"]');
+        var fontDine = block.querySelector('[name="' + prefix + 'font_mode_dine_in"]');
+        var fontTake = block.querySelector('[name="' + prefix + 'font_mode_takeaway"]');
         var payload = {
             connection_type: connectionType,
             paper_width: block.querySelector('[name="' + prefix + 'paper_width"]').value || '32',
             printer_encoding: block.querySelector('[name="' + prefix + 'printer_encoding"]').value || 'cp850',
+            font_mode: fontMode ? fontMode.value : 'auto',
+            font_mode_dine_in: fontDine ? fontDine.value : 'auto',
+            font_mode_takeaway: fontTake ? fontTake.value : 'auto',
         };
         var deviceInput = block.querySelector('[name="' + prefix + 'device_id"]');
         if (deviceInput && deviceInput.value) payload.device_id = deviceInput.value.trim();

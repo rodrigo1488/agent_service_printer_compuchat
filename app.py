@@ -497,6 +497,9 @@ def config():
                     "printer_encoding": request.form.get(prefix + "printer_encoding", "cp850").strip() or "cp850",
                     "name": request.form.get(prefix + "name", "").strip(),
                     "connection_type": connection_type,
+                    "font_mode": request.form.get(prefix + "font_mode", "auto").strip() or "auto",
+                    "font_mode_dine_in": request.form.get(prefix + "font_mode_dine_in", "auto").strip() or "auto",
+                    "font_mode_takeaway": request.form.get(prefix + "font_mode_takeaway", "auto").strip() or "auto",
                 }
                 
                 if connection_type == "local":
@@ -1238,6 +1241,34 @@ def api_logs():
     )
 
 
+def _font_mode_test_receipt(data, font_mode_label):
+    def line(label, mode):
+        return {
+            "name": f"{label}: {font_mode_label(mode)}",
+            "quantity": 1,
+            "value": 0.0,
+            "total": 0.0,
+        }
+
+    return {
+        "form_name": "TESTE DE IMPRESSAO",
+        "protocol": "TEST-0001",
+        "date": "Teste",
+        "customer": {"name": "Teste de fonte", "phone": "", "email": ""},
+        "items_by_group": {
+            "Modos": [
+                line("Cardapio e delivery", data.get("font_mode")),
+                line("Consumo no local", data.get("font_mode_dine_in")),
+                line("Para levar", data.get("font_mode_takeaway")),
+            ]
+        },
+        "custom_info": {},
+        "total": 0.0,
+        "font_scale": 1,
+        "printFontScale": 1,
+    }
+
+
 @app.route("/api/test-printer", methods=["POST"])
 def test_printer():
     """Testa uma impressora (rede ou local) enviando uma página de teste."""
@@ -1254,7 +1285,7 @@ def test_printer():
                 return jsonify({"error": "pywin32 não está instalado. Instale com: pip install pywin32"}), 400
             
             try:
-                from printer_service import PrinterService
+                from printer_service import PrinterService, apply_printer_font_mode, font_mode_label
                 printer = PrinterService(
                     connection_type="local",
                     printer_name_local=printer_name_local,
@@ -1262,18 +1293,10 @@ def test_printer():
                     printer_encoding=data.get("printer_encoding", "cp850"),
                 )
                 
-                # Criar conteúdo de teste
-                test_receipt = {
-                    "form_name": "TESTE DE IMPRESSÃO",
-                    "protocol": "TEST-0001",
-                    "date": "Teste",
-                    "customer": {"name": "Teste", "phone": "", "email": ""},
-                    "items_by_group": {"Teste": [{"name": "Página de teste", "quantity": 1, "value": 0.0, "total": 0.0}]},
-                    "custom_info": {},
-                    "total": 0.0,
-                }
-                
-                success = printer.print_receipt(test_receipt)
+                test_receipt = _font_mode_test_receipt(data, font_mode_label)
+                success = printer.print_receipt(
+                    apply_printer_font_mode(test_receipt, data, {"orderType": "delivery"})
+                )
                 if success:
                     return jsonify({"success": True, "message": f"Teste enviado com sucesso para {printer_name_local}"})
                 else:
@@ -1291,7 +1314,7 @@ def test_printer():
                 return jsonify({"error": "IP da impressora não especificado"}), 400
             
             try:
-                from printer_service import PrinterService
+                from printer_service import PrinterService, apply_printer_font_mode, font_mode_label
                 printer = PrinterService(
                     printer_ip=printer_ip,
                     printer_port=printer_port,
@@ -1301,18 +1324,10 @@ def test_printer():
                     connection_type="network",
                 )
                 
-                # Criar conteúdo de teste
-                test_receipt = {
-                    "form_name": "TESTE DE IMPRESSÃO",
-                    "protocol": "TEST-0001",
-                    "date": "Teste",
-                    "customer": {"name": "Teste", "phone": "", "email": ""},
-                    "items_by_group": {"Teste": [{"name": "Página de teste", "quantity": 1, "value": 0.0, "total": 0.0}]},
-                    "custom_info": {},
-                    "total": 0.0,
-                }
-                
-                success = printer.print_receipt(test_receipt)
+                test_receipt = _font_mode_test_receipt(data, font_mode_label)
+                success = printer.print_receipt(
+                    apply_printer_font_mode(test_receipt, data, {"orderType": "delivery"})
+                )
                 if success:
                     return jsonify({"success": True, "message": f"Teste enviado com sucesso para {printer_ip}:{printer_port}"})
                 else:

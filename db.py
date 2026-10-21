@@ -2,6 +2,7 @@
 import sqlite3
 import json
 import os
+import time
 import unicodedata
 from datetime import datetime
 from typing import List, Dict, Any, Optional
@@ -511,6 +512,9 @@ def get_printers() -> List[Dict[str, Any]]:
                         "name": p.get("name") or "",
                         "connection_type": p.get("connection_type") or "network",
                         "printer_name_local": p.get("printer_name_local") or "",
+                        "font_mode": p.get("font_mode") or "auto",
+                        "font_mode_dine_in": p.get("font_mode_dine_in") or "auto",
+                        "font_mode_takeaway": p.get("font_mode_takeaway") or "auto",
                     }
                     for p in data
                     if isinstance(p, dict)
@@ -532,6 +536,9 @@ def get_printers() -> List[Dict[str, Any]]:
                 "name": "",
                 "connection_type": "network",
                 "printer_name_local": "",
+                "font_mode": "auto",
+                "font_mode_dine_in": "auto",
+                "font_mode_takeaway": "auto",
             }
         ]
     return []
@@ -561,6 +568,9 @@ def set_printers(printers: List[Dict[str, Any]]) -> None:
             "name": p.get("name") or "",
             "connection_type": p.get("connection_type") or "network",
             "printer_name_local": p.get("printer_name_local") or "",
+            "font_mode": p.get("font_mode") or "auto",
+            "font_mode_dine_in": p.get("font_mode_dine_in") or "auto",
+            "font_mode_takeaway": p.get("font_mode_takeaway") or "auto",
         }
         for p in sanitized_printers
     ]
@@ -1036,12 +1046,53 @@ def claim_pos_order(client_order_id: str) -> Optional[Dict[str, Any]]:
             return data if isinstance(data, dict) else None
         conn.execute(
             "INSERT INTO pos_orders_queue (client_order_id, result_json) VALUES (?, ?)",
-            (client_order_id, json.dumps({"pending": True}, ensure_ascii=False)),
+            (
+                client_order_id,
+                json.dumps(
+                    {"pending": True, "startedAt": time.time()},
+                    ensure_ascii=False,
+                ),
+            ),
         )
         conn.commit()
         return None
     finally:
         conn.close()
+
+
+def release_pos_order(client_order_id: str) -> None:
+    """Apaga a reserva só enquanto o pedido ainda está pendente."""
+    conn = _get_connection()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT result_json FROM pos_orders_queue WHERE client_order_id = ?",
+            (client_order_id,),
+        ).fetchone()
+        if row:
+            data = _json_load(row[0], {})
+            if isinstance(data, dict) and data.get("pending"):
+                conn.execute(
+                    "DELETE FROM pos_orders_queue WHERE client_order_id = ?",
+                    (client_order_id,),
+                )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def wait_pos_order(client_order_id: str, timeout: float = 35.0) -> Optional[Dict[str, Any]]:
+    """Espera o envio em andamento terminar. None = a reserva foi liberada."""
+    deadline = time.time() + timeout
+    while True:
+        current = get_pos_order(client_order_id)
+        if not isinstance(current, dict):
+            return None
+        if not current.get("pending"):
+            return current
+        if time.time() >= deadline:
+            return current
+        time.sleep(0.4)
 
 
 def save_pos_order(client_order_id: str, result: Dict[str, Any]) -> None:

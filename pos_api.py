@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import time
 import uuid
 from datetime import datetime, timezone
 from functools import wraps
@@ -247,7 +248,7 @@ def _assign_printer(grupo: str, printers: List[Dict[str, Any]], routes: Dict[str
 
 
 def _send_receipt(printer_cfg: Dict[str, Any], payload: Dict[str, Any], *, timeout: int = 4) -> bool:
-    from printer_service import PrinterService
+    from printer_service import PrinterService, apply_printer_font_mode
     from receipt_formatter import format_order_receipt
 
     printer = PrinterService(
@@ -261,7 +262,8 @@ def _send_receipt(printer_cfg: Dict[str, Any], payload: Dict[str, Any], *, timeo
         timeout=timeout,
         max_retries=0,
     )
-    return bool(printer.print_receipt(format_order_receipt(payload)))
+    receipt = apply_printer_font_mode(format_order_receipt(payload), printer_cfg, payload)
+    return bool(printer.print_receipt(receipt))
 
 
 def _cancel_printer_queue(printer_cfg: Dict[str, Any]) -> Dict[str, Any]:
@@ -828,24 +830,64 @@ def pos_trocar_nome(mesa_id: int):
     )
 
 
+def _pending_is_stale(existing: Dict[str, Any]) -> bool:
+    """Reserva antiga ou sem horário ficou presa depois de falha/timeout."""
+    started = existing.get("startedAt")
+    if started is None:
+        return True
+    try:
+        return time.time() - float(started) > 45
+    except (TypeError, ValueError):
+        return True
+
+
+def _reuse_finished_order(client_order_id: str, body: Dict[str, Any], existing: Dict[str, Any]):
+    if existing.get("ok") and not existing.get("printed"):
+        print_info = _print_kitchen(_order_print_payload(body, existing))
+        existing["printed"] = bool(print_info.get("printed"))
+        existing["printError"] = print_info.get("error") or ""
+        db.save_pos_order(client_order_id, existing)
+    return jsonify({"ok": True, "reused": True, **existing})
+
+
 @pos_bp.route("/pos/orders", methods=["POST"])
 @_require_pos_token
 def pos_orders():
     body = request.get_json(silent=True) or {}
     client_order_id = str(body.get("clientOrderId") or "").strip() or str(uuid.uuid4())
-    existing = db.claim_pos_order(client_order_id)
-    if existing:
-        if existing.get("pending"):
-            return jsonify({"error": "order_in_progress", "clientOrderId": client_order_id}), 409
-        if existing.get("ok") and not existing.get("printed"):
-            print_info = _print_kitchen(_order_print_payload(body, existing))
-            existing["printed"] = bool(print_info.get("printed"))
-            existing["printError"] = print_info.get("error") or ""
-            db.save_pos_order(client_order_id, existing)
-        return jsonify({"ok": True, "reused": True, **existing})
+    owned = False
+    for _ in range(3):
+        existing = db.claim_pos_order(client_order_id)
+        if existing is None:
+            owned = True
+            break
+        if not existing.get("pending"):
+            return _reuse_finished_order(client_order_id, body, existing)
+        if _pending_is_stale(existing):
+            db.release_pos_order(client_order_id)
+            continue
+        finished = db.wait_pos_order(client_order_id, timeout=35)
+        if finished is None:
+            continue
+        if not finished.get("pending"):
+            return _reuse_finished_order(client_order_id, body, finished)
+        if _pending_is_stale(finished):
+            db.release_pos_order(client_order_id)
+            continue
+        return jsonify({
+            "error": "O pedido ainda está sendo enviado. Aguarde e toque em Enviar de novo.",
+            "clientOrderId": client_order_id,
+        }), 409
+
+    if not owned:
+        return jsonify({
+            "error": "Não foi possível enviar o pedido agora. Tente de novo.",
+            "clientOrderId": client_order_id,
+        }), 409
 
     menu_items = body.get("menuItems") or []
     if not menu_items:
+        db.release_pos_order(client_order_id)
         return jsonify({"error": "empty_order"}), 400
 
     mesa = None
@@ -870,6 +912,7 @@ def pos_orders():
 
     itens = _build_uniplus_items(menu_items, protocol)
     if not itens:
+        db.release_pos_order(client_order_id)
         return jsonify({"error": "no_items"}), 400
 
     total = round(sum(float(it.get("valortotal") or 0) for it in itens), 2)
@@ -903,18 +946,22 @@ def pos_orders():
     try:
         uniplus = handle_uniplus_job(db, conteudo)
     except Exception as exc:
+        db.release_pos_order(client_order_id)
         return jsonify({"error": str(exc), "clientOrderId": client_order_id}), 502
 
-    print_payload = {
-        "formName": "Pedido mesa",
-        "protocol": protocol,
-        "tableNumber": table_number,
-        "garcomName": garcom_name,
-        "orderType": "mesa",
-        "menuItems": menu_items,
-        "responder": {"name": customer_name},
-        "submittedAt": now.isoformat(),
-    }
+    print_payload = _with_fulfillment(
+        {
+            "formName": "Pedido mesa",
+            "protocol": protocol,
+            "tableNumber": table_number,
+            "garcomName": garcom_name,
+            "orderType": "mesa",
+            "menuItems": menu_items,
+            "responder": {"name": customer_name},
+            "submittedAt": now.isoformat(),
+        },
+        body,
+    )
     # Imprime antes de responder: o tablet usa `printed` na UI e interpretava
     # "Impressão em andamento" (async) como "não impresso".
     print_info = _print_kitchen(print_payload)
@@ -937,14 +984,36 @@ def pos_orders():
     return jsonify(result)
 
 
+def _fulfillment_mode(body: Dict[str, Any]) -> str:
+    raw = str((body or {}).get("fulfillmentMode") or "").strip().lower()
+    if raw in ("pickup", "takeaway", "levar", "para_levar", "retirada"):
+        return "pickup"
+    if (body or {}).get("pickup") is True or (body or {}).get("retirada") is True:
+        return "pickup"
+    if raw in ("dine_in", "local", "consumo"):
+        return "dine_in"
+    return ""
+
+
+def _with_fulfillment(payload: Dict[str, Any], body: Dict[str, Any]) -> Dict[str, Any]:
+    mode = _fulfillment_mode(body)
+    payload["fulfillmentMode"] = mode
+    payload["pickup"] = mode == "pickup"
+    payload["retirada"] = mode == "pickup"
+    return payload
+
+
 def _order_print_payload(body: Dict[str, Any], existing: Dict[str, Any]) -> Dict[str, Any]:
-    return {
-        "formName": "Pedido mesa",
-        "protocol": existing.get("protocol") or "",
-        "tableNumber": existing.get("tableNumber") or body.get("tableNumber") or "",
-        "garcomName": existing.get("garcomName") or body.get("garcomName") or "",
-        "orderType": "mesa",
-        "menuItems": body.get("menuItems") or [],
-        "responder": {"name": existing.get("customerName") or body.get("customerName") or "Cliente"},
-        "submittedAt": datetime.now(timezone.utc).isoformat(),
-    }
+    return _with_fulfillment(
+        {
+            "formName": "Pedido mesa",
+            "protocol": existing.get("protocol") or "",
+            "tableNumber": existing.get("tableNumber") or body.get("tableNumber") or "",
+            "garcomName": existing.get("garcomName") or body.get("garcomName") or "",
+            "orderType": "mesa",
+            "menuItems": body.get("menuItems") or [],
+            "responder": {"name": existing.get("customerName") or body.get("customerName") or "Cliente"},
+            "submittedAt": datetime.now(timezone.utc).isoformat(),
+        },
+        body,
+    )
